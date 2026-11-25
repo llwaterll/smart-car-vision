@@ -69,6 +69,8 @@ void NEUQ_Hard_SPI_transfer(Hard_SPI_DEV_ENUM DEV_select,const uint8_t *tx_data,
 void NEUQ_Hard_SPI_switch_to_16bit_mode(Hard_SPI_DEV_ENUM DEV_select);
 void NEUQ_Hard_SPI_switch_to_8bit_mode(Hard_SPI_DEV_ENUM DEV_select);
 void NEUQ_Hard_SPI_wait_idle(Hard_SPI_DEV_ENUM DEV_select);
+uint8_t NEUQ_Hard_SPI_Fault(Hard_SPI_DEV_ENUM DEV_select);
+uint32_t NEUQ_Hard_SPI_TimeoutCount(void);
 
 
 #endif

@@ -15,6 +15,11 @@
  *   拖慢采样。队列是单写单读，head 只有中断写、tail 只有主循环写，
  *   两边各改各的，不需要关中断。
  *
+ * 防卡死：
+ *   - 队列满时丢“新事件”，不覆盖旧事件，也不等待；
+ *   - 入口检查 id/type/下标，坏值直接丢弃；
+ *   - 长按计时做饱和处理，不会回绕成“永远不到长按”。
+ *
  * 函数列表
  *   static void key_push(uint8_t id, uint8_t type)
  *   void        Key_Init(void)
@@ -26,16 +31,21 @@
 #include "NEUQ_lib_include.h"
 #include "Drv_Key.h"
 
+/* 一个键的静态配置 + 扫描状态，放在同一张表里，扫描循环只按下标取一次。 */
+typedef struct {
+    GPIO_Ports_ENUM pin;        /* 引脚 */
+    GPIO_Level      active;     /* 按下时读到的电平 */
+    uint8_t         stable;     /* 消抖后认定的状态：1 按下，0 松开 */
+    uint8_t         count;      /* 连续读到“与认定不同”的次数 */
+    uint16_t        hold_ms;    /* 已按住多久，用于长按连发 */
+} KeyState;
 
-// 四个键的引脚和"按下时的电平"，顺序与 Key_Id_Enum 一致；具体引脚在 Task_Config.h 中修改
-static const GPIO_Ports_ENUM s_pin[KEY_NUM]    = {KEY_UP_PIN, KEY_DOWN_PIN, KEY_OK_PIN, KEY_BACK_PIN};
-static const GPIO_Level      s_active[KEY_NUM] = {KEY_UP_ACTIVE_LEVEL, KEY_DOWN_ACTIVE_LEVEL,
-                                                  KEY_OK_ACTIVE_LEVEL, KEY_BACK_ACTIVE_LEVEL};
-
-// 每个键的消抖状态
-static uint8_t  s_stable[KEY_NUM];      // 消抖后认定的状态：1 按下，0 松开
-static uint8_t  s_count[KEY_NUM];       // "读到的状态和认定的状态不同"已经连续了几次
-static uint16_t s_hold_ms[KEY_NUM];     // 已经按住多久（用于长按连发）
+static KeyState s_keys[KEY_NUM] = {
+    {KEY_UP_PIN,   KEY_UP_ACTIVE_LEVEL,   0, 0, 0},
+    {KEY_DOWN_PIN, KEY_DOWN_ACTIVE_LEVEL, 0, 0, 0},
+    {KEY_OK_PIN,   KEY_OK_ACTIVE_LEVEL,   0, 0, 0},
+    {KEY_BACK_PIN, KEY_BACK_ACTIVE_LEVEL, 0, 0, 0},
+};
 
 // 事件队列（环形缓冲）：只有中断写 s_head，只有主循环写 s_tail，两边各改各的，不需要关中断
 static volatile Key_Event_Struct s_queue[KEY_QUEUE_SIZE];
@@ -55,10 +65,22 @@ static volatile uint8_t          s_tail = 0;    // 下一个事件从哪里读
  *           旧事件更接近用户当时的意图。先写数据再移动 head，
  *           主循环看到 head 变化时数据一定已写好；head 只在中断里写，
  *           tail 只在 Key_GetEvent 里写，单写单读，不需要关中断。
+ *           异常的 id/type 或越界下标直接丢弃，不修改队列。
  */
 static void key_push(uint8_t id, uint8_t type)
 {
-    uint8_t next = (uint8_t)((s_head + 1U) % KEY_QUEUE_SIZE);
+    uint8_t next;
+
+    if (id >= KEY_NUM || (type != KEY_EVENT_PRESS && type != KEY_EVENT_REPEAT)) {
+        return;
+    }
+    if (s_head >= KEY_QUEUE_SIZE) {
+        s_head = 0;
+    }
+    if (s_tail >= KEY_QUEUE_SIZE) {
+        s_tail = 0;
+    }
+    next = (uint8_t)((s_head + 1U) % KEY_QUEUE_SIZE);
     if (next == s_tail) {
         return;
     }
@@ -75,15 +97,17 @@ static void key_push(uint8_t id, uint8_t type)
 void Key_Init(void)
 {
     uint8_t i;
+
     for (i = 0; i < KEY_NUM; i++) {
-        GPIO_Mode_ENUM mode = (GPIO_Mode_ENUM)((s_active[i] == GPIO_Low) ? GPIO_Mode_Input_PullUp : GPIO_Mode_Input_PullDown);
-        NEUQ_GPIO_init(s_pin[i], mode, GPIO_High);
-        s_stable[i]  = 0;
-        s_count[i]   = 0;
-        s_hold_ms[i] = 0;
+        KeyState *k = &s_keys[i];
+        GPIO_Mode_ENUM mode = (GPIO_Mode_ENUM)((k->active == GPIO_Low) ? GPIO_Mode_Input_PullUp : GPIO_Mode_Input_PullDown);
+        NEUQ_GPIO_init(k->pin, mode, GPIO_High);
+        k->stable  = 0U;
+        k->count   = 0U;
+        k->hold_ms = 0U;
     }
-    s_head = 0;
-    s_tail = 0;
+    s_head = 0U;
+    s_tail = 0U;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -97,16 +121,20 @@ void Key_Init(void)
 void Key_Scan(void)
 {
     uint8_t i;
-    for (i = 0; i < KEY_NUM; i++) {
-        uint8_t pressed = (NEUQ_GPIO_read(s_pin[i]) == s_active[i]) ? 1U : 0U;   // 这一次读到的状态
 
-        if (pressed != s_stable[i]) {
+    for (i = 0; i < KEY_NUM; i++) {
+        KeyState *k = &s_keys[i];
+        uint8_t pressed = (NEUQ_GPIO_read(k->pin) == k->active) ? 1U : 0U;   // 这一次读到的状态
+
+        if (pressed != k->stable) {
             // 读到的和认定的不一样：可能真的按下/松开了，也可能只是抖动，先计数
-            s_count[i]++;
-            if (s_count[i] >= KEY_DEBOUNCE_COUNT) {
-                s_stable[i]  = pressed;         // 连续多次都这样，认定状态真的变了
-                s_count[i]   = 0;
-                s_hold_ms[i] = 0;
+            if (k->count < 0xFFU) {
+                k->count++;
+            }
+            if (k->count >= KEY_DEBOUNCE_COUNT) {
+                k->stable  = pressed;           // 连续多次都这样，认定状态真的变了
+                k->count   = 0U;
+                k->hold_ms = 0U;
                 if (pressed) {
                     key_push(i, KEY_EVENT_PRESS);
                 }
@@ -114,14 +142,18 @@ void Key_Scan(void)
         }
         else {
             // 读到的和认定的一样：之前的变化只是抖动，计数清零
-            s_count[i] = 0;
+            k->count = 0U;
 
             // 上/下键一直按着：计时，到时间就产生连发事件
-            if (s_stable[i] && (i == KEY_UP || i == KEY_DOWN)) {
-                s_hold_ms[i] += KEY_SCAN_PERIOD_MS;
-                if (s_hold_ms[i] >= KEY_REPEAT_DELAY_MS) {
+            if (k->stable && (i == KEY_UP || i == KEY_DOWN)) {
+                if (k->hold_ms > (uint16_t)(0xFFFFU - KEY_SCAN_PERIOD_MS)) {
+                    k->hold_ms = 0xFFFFU;       // 饱和，避免回绕
+                } else {
+                    k->hold_ms = (uint16_t)(k->hold_ms + KEY_SCAN_PERIOD_MS);
+                }
+                if (k->hold_ms >= KEY_REPEAT_DELAY_MS) {
                     key_push(i, KEY_EVENT_REPEAT);
-                    s_hold_ms[i] = KEY_REPEAT_DELAY_MS - KEY_REPEAT_PERIOD_MS;  // 再过一个连发间隔触发下一次
+                    k->hold_ms = (uint16_t)(KEY_REPEAT_DELAY_MS - KEY_REPEAT_PERIOD_MS);  // 再过一个连发间隔触发下一次
                 }
             }
         }
@@ -134,13 +166,22 @@ void Key_Scan(void)
 //-------------------------------------------------------------------------------------------------------------------
 uint8_t Key_GetEvent(Key_Event_Struct *event)
 {
+    if (event == NULL) {
+        return 0U;
+    }
+    if (s_tail >= KEY_QUEUE_SIZE) {
+        s_tail = 0U;
+    }
+    if (s_head >= KEY_QUEUE_SIZE) {
+        s_head = 0U;                        // 只在下标被异常写坏时自愈
+    }
     if (s_tail == s_head) {
-        return 0;
+        return 0U;
     }
     event->id   = s_queue[s_tail].id;
     event->type = s_queue[s_tail].type;
     s_tail = (uint8_t)((s_tail + 1U) % KEY_QUEUE_SIZE);
-    return 1;
+    return 1U;
 }
 
 void Key_ClearEvents(void)

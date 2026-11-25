@@ -11,7 +11,8 @@
  *   线上帧格式（不可改，所有多字节整数为大端）：
  *     A5 5A | version:u8 | type:u8 | length:u16 | seq:u16 | session:u32
  *           | age_ms:u16 | payload | CRC16-CCITT-FALSE
- *     CRC 覆盖 version 至 payload；HELLO=0、TRACK=1（16 B）、SUDOKU_TILE=2（10 B）。
+ *     CRC 覆盖 version 至 payload；HELLO=0、TRACK=1（16 B）、SUDOKU_TILE=2（10 B）、
+ *     CAMERA_STATUS=3（1 B）。状态帧只用于显示，不需要绑定比赛会话。
  *     只有停车状态才允许 HELLO 绑定新会话；视觉消息不能启动电机或写 PWM。
  *
  *   运行视角
@@ -38,6 +39,7 @@
  *   - HELLO = 0：负载 0 字节、age 为 0；
  *   - TRACK = 1：负载 16 字节；
  *   - SUDOKU_TILE = 2：负载 10 字节；
+ *   - CAMERA_STATUS = 3：负载 1 字节，1=有画面，0=近 1 s 无画面；
  *   - 仅停车时允许 HELLO 绑定非零会话；
  *   - 本接口中的消息不能启动电机或写入 PWM。
  *
@@ -50,6 +52,14 @@
 #define VIS_MAX_FRAME     (16U + VIS_MAX_PAYLOAD)
 #define VIS_FRAME_GAP_MS  50U
 #define VIS_MAX_AGE_MS    200U
+#define VIS_STATUS_TIMEOUT_MS 1000U
+
+/* 摄像头状态：香橙派每约 250 ms 用 TYPE=3 帧报告一次；1 s 没收到就按未知处理。 */
+typedef enum {
+    VISION_CAMERA_UNKNOWN,     /* 没收到状态帧 */
+    VISION_CAMERA_NO_FRAME,    /* 相机打开/读帧失败 */
+    VISION_CAMERA_STREAMING    /* 有画面 */
+} CarVisionCameraStatus;
 
 /*
  * 道路观测有效位掩码，可按位组合；
@@ -57,10 +67,11 @@
  */
 enum
 {
-    VISION_LATERAL_VALID = 1,   /* 横向偏差有效 */
-    VISION_HEADING_VALID = 2,   /* 航向角有效 */
-    VISION_CURVATURE_VALID = 4, /* 曲率有效 */
-    VISION_DISTANCE_VALID = 8   /* 距离有效 */
+    VISION_LATERAL_VALID = 1,        /* 横向偏差有效 */
+    VISION_HEADING_VALID = 2,        /* 航向角有效 */
+    VISION_CURVATURE_VALID = 4,      /* 曲率有效 */
+    VISION_DISTANCE_VALID = 8,       /* 距离有效 */
+    VISION_CURVATURE_ESTIMATED = 16  /* 单边补线估计，须与曲率有效位同时置位 */
 };
 
 /*
@@ -136,6 +147,8 @@ typedef struct
     uint32_t accepted_frames;  /* 已接受帧数，含 HELLO */
     uint32_t bad_frames;       /* 长度越界或 CRC 错误的帧数 */
     uint32_t rejected_frames;  /* CRC 正确但业务字段不合法的帧数 */
+    uint32_t camera_status_ms; /* 最近一次收到摄像头状态帧的时间 */
+    CarVisionCameraStatus camera_status; /* 最近一次摄像头状态 */
 
     CarVisionObservation observation; /* 最近一份有效道路观测 */
 
@@ -157,6 +170,23 @@ void CarVision_Init(CarVision *v);
  * @note 保留会话、最近序号和统计。数独块仅在切换会话或完整初始化时清除。
  */
 void CarVision_Invalidate(CarVision *v);
+
+/**
+ * @brief 结束一轮比赛：作废会话、道路观测和数独块。
+ * @param v 解析器对象。
+ * @note 保留诊断统计和最近序号。停车并完成收尾后调用；下一次停车状态下的
+ *       HELLO 可以沿用发送端原来的会话号，重新绑定并开始新一轮。
+ */
+void CarVision_CloseRaceSession(CarVision *v);
+
+/**
+ * @brief 取摄像头状态；超过 VIS_STATUS_TIMEOUT_MS 没收到状态帧则返回 UNKNOWN。
+ * @param v      解析器对象。
+ * @param now_ms 当前毫秒时间。
+ * @return VISION_CAMERA_UNKNOWN / NO_FRAME / STREAMING。
+ * @note 摄像头状态独立于比赛会话和道路检测，仅用于 LCD 诊断。
+ */
+CarVisionCameraStatus CarVision_GetCameraStatus(const CarVision *v, uint32_t now_ms);
 
 /**
  * @brief 更新一个字节的 CRC16-CCITT-FALSE，返回新的累计值。

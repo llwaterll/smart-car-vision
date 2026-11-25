@@ -112,9 +112,20 @@ inline void findSeed(Observation& out, const FrontendConfig& c) {
     const int margin = std::max(c.seedMargin, c.blueProbe);
     const int minWidth = std::max(3, static_cast<int>(w * c.minRunRatio));
     if (w <= 2 * margin || h <= 2 * c.seedMargin) return;
-    for (int y = h - 1 - c.seedMargin; y >= static_cast<int>(h * c.seedTopRatio); --y) {
+    const int nearTop = static_cast<int>(h * c.seedTopRatio);
+    // A seam on the optical axis may leave an unbroken white strip just beside it.
+    // Keep the same column across rows: separate white patches cannot bridge a gap.
+    const int offset = std::max(1, c.blueProbe / 2);
+    const int probes[] = {w / 2 - offset, w / 2, w / 2 + offset};
+    bool connected[] = {true, true, true};
+    for (int y = h - 1 - c.seedMargin; y >= std::min(nearTop, h / 3); --y) {
         const uchar* row = out.roadMask.ptr<uchar>(y);
         const uchar* blue = out.blueMask.ptr<uchar>(y);
+        for (int i = 0; i < 3; ++i) {
+            const int x = probes[i];
+            connected[i] = connected[i] && row[x - 1] && row[x] && row[x + 1];
+        }
+        if (y < nearTop && !connected[0] && !connected[1] && !connected[2]) break;
         double bestScore = -1e9;
         int bestL = -1, bestR = -1;
         double bestSupport = 0;
@@ -123,6 +134,12 @@ inline void findSeed(Observation& out, const FrontendConfig& c) {
             const int l = x;
             while (x < w && row[x]) ++x;
             const int r = x - 1;
+            if (y < nearTop) {
+                bool reachesNear = false;
+                for (int i = 0; i < 3; ++i)
+                    if (connected[i] && l <= probes[i] - 1 && probes[i] + 1 <= r) reachesNear = true;
+                if (!reachesNear) continue;
+            }
             if (r - l + 1 < minWidth || l < margin || r >= w - margin) continue;
             int lb = 0, rb = 0;
             for (int k = 1; k <= c.blueProbe; ++k) {
@@ -142,6 +159,50 @@ inline void findSeed(Observation& out, const FrontendConfig& c) {
             return;
         }
     }
+}
+
+struct SingleEdgeSeed {
+    int x = -1, y = -1;
+    int side = 0; // +1 left edge, -1 right edge
+};
+
+inline SingleEdgeSeed findSingleEdgeSeed(const cv::Mat& roadMask, const cv::Mat& blueMask,
+                                         const FrontendConfig& c, int priorY, int priorLeft, int priorRight) {
+    SingleEdgeSeed best;
+    constexpr int rowTolerance = 36;
+    constexpr int columnTolerance = 64;
+    int bestScore = 3 * columnTolerance;
+    const int margin = std::max(c.seedMargin, c.blueProbe);
+    const int minWidth = std::max(3, static_cast<int>(roadMask.cols * c.minRunRatio));
+    const int firstRow = std::max(priorY - rowTolerance, static_cast<int>(roadMask.rows * c.seedTopRatio));
+    const int lastRow = std::min(priorY + rowTolerance, roadMask.rows - 1 - c.seedMargin);
+    for (int y = firstRow; y <= lastRow; ++y) {
+        const uchar* road = roadMask.ptr<uchar>(y);
+        const uchar* blue = blueMask.ptr<uchar>(y);
+        for (int x = 0; x < roadMask.cols;) {
+            if (!road[x]) { ++x; continue; }
+            const int left = x;
+            while (x < roadMask.cols && road[x]) ++x;
+            const int right = x - 1;
+            if (right - left + 1 < minWidth) continue;
+            int leftBlue = 0, rightBlue = 0;
+            for (int k = 1; k <= c.blueProbe; ++k) {
+                leftBlue += left >= margin && blue[left - k] != 0;
+                rightBlue += right < roadMask.cols - margin && blue[right + k] != 0;
+            }
+            const bool hasLeft = leftBlue >= c.blueProbe * c.minBlueRatio;
+            const bool hasRight = rightBlue >= c.blueProbe * c.minBlueRatio;
+            if (hasLeft == hasRight) continue;
+            const int edge = hasLeft ? left : right;
+            const int delta = std::abs(edge - (hasLeft ? priorLeft : priorRight));
+            const int score = delta + 2 * std::abs(y - priorY);
+            if (delta <= columnTolerance && score < bestScore) {
+                best = {edge, y, hasLeft ? 1 : -1};
+                bestScore = score;
+            }
+        }
+    }
+    return best;
 }
 
 // 阶段 5：把前端步骤串成单帧处理：BGR 转 HSV -> 白色候选/蓝底掩膜

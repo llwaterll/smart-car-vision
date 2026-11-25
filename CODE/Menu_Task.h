@@ -11,13 +11,19 @@
  *   运行视角
  *     控制中断每拍把按键事件交给 Menu_Key()，它只返回“要做什么”
  *     （MENU_LAUNCH / MENU_SAVE_PARAMS），真正的发车、写 Flash 由平台层执行；
- *     主循环每 MENU_REFRESH_MS 刷新一行，10 行刷完即一整屏。
+ *     主循环每 MENU_REFRESH_MS 取一次快照并开始刷屏，10 行在随后几轮
+ *     主循环里连续画完。
  *
  *   菜单结构（与实车一致）
  *     Race        ：Start race / Race status / Sudoku result
  *     Sensors     ：Wheel speeds / IMU / Vision
  *     Left wheel inner PID  ：Kp / Ki / Kd / Save parameters
  *     Right wheel inner PID ：同上
+ *
+ *   导航结构
+ *     组和组内项都组织成环形双向链表：节点表定义名字/所属组/项号，
+ *     初始化时把 prev/next 连好。UP/DOWN 只沿 prev/next 走一步，
+ *     不需要按数组长度取模，也不存在“走到头”的特殊分支。
  * ============================================================================
  */
 
@@ -39,15 +45,16 @@
 
 typedef enum { MENU_RACE, MENU_SENSORS, MENU_LEFT_PID, MENU_RIGHT_PID, MENU_GROUPS } MenuGroup;
 
-/* 发车条件：只有 START_READY 才允许 OK 发车。 */
+/* 发车条件：只有 START_READY 才允许 OK 发车；START_COUNT 只用于边界检查。 */
 typedef enum { START_READY, START_STOP_FIRST, START_MOVING, START_RESULT,
-               START_NO_ROAD, START_NEW_SESSION } StartCondition;
+               START_NO_ROAD, START_NEW_SESSION, START_COUNT } StartCondition;
 
 /* 菜单动作：返回给平台层执行。 */
 typedef enum { MENU_IDLE, MENU_LAUNCH, MENU_SAVE_PARAMS } MenuAction;
 
 typedef struct {
     uint8_t depth, group, item[MENU_GROUPS], feedback; /* 光标层级/组/项/反馈 */
+    uint8_t node;                                      /* 当前链表节点（组节点或项节点） */
     unsigned candidate;                                /* 正在编辑的增益，放大 100 倍 */
     CarParamsStatus params_status;                     /* 最近一次保存结果 */
 } MenuState;
@@ -61,10 +68,22 @@ typedef struct {
     uint8_t tile_mask;                                         /* 已收到的数独子块位图 */
     uint8_t params_dirty, params_saved;                        /* 参数是否与 Flash 一致 */
     uint32_t vision_ok, vision_bad, vision_rejected;           /* 视觉接收统计 */
+    CarVisionCameraStatus camera_status;                       /* 摄像头状态（香橙派 TYPE=3） */
+    uint8_t pi_connected, vision_enabled;                      /* 香橙派链路 / 视觉功能是否启用 */
     float distance, yaw_deg, gyro_dps, bias_dps;
     float speed[2], reference[2], pwm[2], gains[3];
     CarVisionObservation obs;
 } MenuView;
+
+/*
+ * 函数名称：Menu_Init
+ * 函数功能：把菜单复位到组页，并建立组/项环形链表。
+ * 参数说明：m —— 菜单状态；NULL 时直接返回。
+ * 返回参数：无。
+ * 备注信息：只复位导航与编辑状态，params_status 回到 PARAMS_DEFAULTS；
+ *           平台层随后按 Flash 加载结果覆盖它。
+ */
+void Menu_Init(MenuState *m);
 
 /*
  * 函数名称：Menu_StartCondition

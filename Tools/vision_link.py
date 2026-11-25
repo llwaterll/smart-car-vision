@@ -26,7 +26,8 @@ def track_payload(valid_mask=0, confidence=0, lateral_mm=0, heading_mrad=0,
     values = (valid_mask, confidence, lateral_mm, heading_mrad, curvature_milli, element, tag_id, distance_mm)
     if any(not isinstance(x, int) for x in values):
         raise ValueError('wire fields must be integers')
-    if (not 0 <= valid_mask <= 15 or not 0 <= confidence <= 1000
+    if (not 0 <= valid_mask <= 31 or (valid_mask & 16 and not valid_mask & 4)
+            or not 0 <= confidence <= 1000
             or not -1000 <= lateral_mm <= 1000 or not -3142 <= heading_mrad <= 3142
             or not -20000 <= curvature_milli <= 20000 or not 0 <= element <= 8
             or tag_id not in (*range(8), 255) or not 0 <= distance_mm <= 65535):

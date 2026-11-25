@@ -31,6 +31,43 @@
 ********************************************************************************************************************/
 #include "NEUQ_lib_include.h"
 
+/* 发送忙等上限：按 168 MHz、计数循环约 10 ms 估算。
+ * USART 状态异常时返回，避免 printf/遥测把主循环永久卡住。 */
+#define NEUQ_UART_WAIT_LIMIT 200000U
+
+/* 每个串口一个故障锁存：一次 TXE 等待超时后，后续发送直接丢弃，
+ * 直到 NEUQ_Uart_init() 重新初始化该串口。 */
+static uint8_t s_uart_fault[4];
+
+static uint8_t *NEUQ_Uart_fault_slot(UART_DEV_ENUM DEV_select)
+{
+    unsigned i = (unsigned)DEV_select;
+    if (i >= 4U) {
+        i = 0U;
+    }
+    return &s_uart_fault[i];
+}
+
+/* 等到发送寄存器空；超时锁存故障并返回 0。 */
+static uint8_t NEUQ_Uart_wait_txe(UART_DEV_ENUM DEV_select, USART_TypeDef *usart)
+{
+    uint8_t *fault = NEUQ_Uart_fault_slot(DEV_select);
+    uint32_t n = 0U;
+
+    if (usart == NULL || *fault) {
+        return 0U;
+    }
+    for (;;) {
+        if (usart->SR & USART_SR_TXE) {
+            return 1U;
+        }
+        if (++n > NEUQ_UART_WAIT_LIMIT) {
+            *fault = 1U;
+            return 0U;
+        }
+    }
+}
+
 UART_HandleTypeDef UART_0_handle={0};
 UART_HandleTypeDef UART_1_handle={0};
 UART_HandleTypeDef UART_2_handle={0};
@@ -116,6 +153,11 @@ void NEUQ_Uart_init(UART_DEV_ENUM DEV_select,UART_BAUD_ENUM BAUD_select){
         }
     }
 
+    if (Handle_use == NULL) {
+        return;
+    }
+    *NEUQ_Uart_fault_slot(DEV_select) = 0U;   /* 重新初始化即视为该串口恢复 */
+
     switch(BAUD_select){
         case UART_BAUD_9600:{
             Handle_use->Init.BaudRate=9600;
@@ -161,27 +203,31 @@ void NEUQ_Uart_init(UART_DEV_ENUM DEV_select,UART_BAUD_ENUM BAUD_select){
 //============================================================================
 void NEUQ_Uart_write_byte(UART_DEV_ENUM DEV_select,uint8_t byte){
     switch(DEV_select){
-        case UART_0:{
-            while (!(USART1->SR & USART_SR_TXE)); // 等待发送缓冲区空
+        case UART_0:
+            if (!NEUQ_Uart_wait_txe(DEV_select, USART1)) return; // 等待发送缓冲区空
             USART1->DR = byte;                    // 写入数据寄存器
             break;
-        }
-        case UART_1:{
-            while (!(USART2->SR & USART_SR_TXE)); // 等待发送缓冲区空
-            USART2->DR = byte;                    // 写入数据寄存器
+        case UART_1:
+            if (!NEUQ_Uart_wait_txe(DEV_select, USART2)) return;
+            USART2->DR = byte;
             break;
-        }
-        case UART_2:{
-            while (!(USART3->SR & USART_SR_TXE)); // 等待发送缓冲区空
-            USART3->DR = byte;                    // 写入数据寄存器
+        case UART_2:
+            if (!NEUQ_Uart_wait_txe(DEV_select, USART3)) return;
+            USART3->DR = byte;
             break;
-        }
-        case UART_3:{
-            while (!(UART4->SR & USART_SR_TXE)); // 等待发送缓冲区空
-            UART4->DR = byte;                    // 写入数据寄存器
+        case UART_3:
+            if (!NEUQ_Uart_wait_txe(DEV_select, UART4)) return;
+            UART4->DR = byte;
             break;
-        }
+        default:
+            return;
     }
+}
+
+/* 查询某个串口是否已锁存发送故障（超过约 10 ms 等不到 TXE）。
+ * NEUQ_Uart_init() 重新初始化后自动清零。 */
+uint8_t NEUQ_Uart_Fault(UART_DEV_ENUM DEV_select){
+    return *NEUQ_Uart_fault_slot(DEV_select);
 }
 
 //============================================================================
@@ -192,6 +238,7 @@ void NEUQ_Uart_write_byte(UART_DEV_ENUM DEV_select,uint8_t byte){
 //============================================================================
 void NEUQ_Uart_write_string(UART_DEV_ENUM DEV_select,uint8_t *str){
     int ptr=0;
+    if(str==NULL){return;}
     while(str[ptr]!='\0'){
         NEUQ_Uart_write_byte(DEV_select,str[ptr++]);
     }
@@ -205,7 +252,8 @@ void NEUQ_Uart_write_string(UART_DEV_ENUM DEV_select,uint8_t *str){
 // 返回  值：无
 //============================================================================
 void NEUQ_Uart_write_data(UART_DEV_ENUM DEV_select,uint8_t *pdata,uint32_t len){
-    for(int i=0;i<len;i++){
+    if(pdata==NULL){return;}
+    for(uint32_t i=0;i<len;i++){
         NEUQ_Uart_write_byte(DEV_select,pdata[i]);
     }
 }

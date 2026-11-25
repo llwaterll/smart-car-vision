@@ -51,6 +51,37 @@ static void two_laps(void) {
     assert(clearance>0.12f && wheels.rpm[0]==0 && wheels.rpm[1]==0);
 }
 
+/* Single-side estimated curvature may steer at hold speed, but must not refresh
+ * the measured-road timestamp or the straight-distance accumulator. */
+static void estimated_curvature_hold(void) {
+    TrackState r;
+    CarVisionObservation o = {0};
+    TrackDrive cmd;
+    Track_Start(&r);
+    o.valid_mask = VISION_CURVATURE_VALID;
+    o.confidence = 0.9f;
+    o.curvature_inv_m = 0;
+    o.sequence = 1;
+    cmd = Track_Step(&r,&o,0.01f,0.01f,0.005f,0,0,0,100);
+    assert(r.phase == TRACK_SEGMENT_TRACK && !r.degraded);
+    assert(r.last_measured_curve == 0 && r.last_road_ms == 100);
+
+    o.valid_mask |= VISION_CURVATURE_ESTIMATED;
+    o.curvature_inv_m = 2.0f;
+    ++o.sequence;
+    r.straight_m = 0.12f;
+    cmd = Track_Step(&r,&o,0.01f,0.01f,0.005f,0,0,0,200);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.degraded);
+    assert(r.last_curve > 1.9f);           /* estimated curve still steers */
+    assert(r.last_measured_curve == 0);    /* measured curve unchanged */
+    assert(r.last_road_ms == 100);         /* line-loss timer not refreshed */
+    assert(fabsf(r.straight_m - 0.13f) < 0.0001f); /* measured straight only */
+    {
+        float mps = 6.2831853f * TRACK_RADIUS_M / 60.0f * 0.5f * (cmd.rpm[0] + cmd.rpm[1]);
+        assert(mps <= TRACK_HOLD_SPEED_MPS + 0.001f);
+    }
+}
+
 int main(void) {
     TrackState r;
     TrackDrive cmd;
@@ -66,6 +97,7 @@ int main(void) {
     assert(!Sudoku_Solve(tiles,answer));
     memset(tiles,0,sizeof(tiles));
     assert(!Sudoku_Solve(tiles,answer));
+    estimated_curvature_hold();
     Track_Start(&r);
     o.valid_mask=VISION_CURVATURE_VALID; o.curvature_inv_m=3; o.confidence=1;
     cmd=Track_Step(&r,&o,0,0,0.005f,0,0,1,0);

@@ -31,6 +31,7 @@ struct CrossStateMachine {
         constexpr std::size_t shortLineCount = 20;
         constexpr int lostConfirmFrames = 2;
         constexpr int recoveredConfirmFrames = 3;
+        constexpr int falseCrossRecoveryFrames = 6;
 
         const float leftDistance = static_cast<float>(cv::norm(leftCorner - vehiclePoint));
         const float rightDistance = static_cast<float>(cv::norm(rightCorner - vehiclePoint));
@@ -42,6 +43,9 @@ struct CrossStateMachine {
         const bool bothLinesShort =
             leftCount < shortLineCount &&
             rightCount < shortLineCount;
+        const bool bothLinesLong =
+            leftCount >= shortLineCount &&
+            rightCount >= shortLineCount;
 
         switch (state) {
         case CrossState::None:
@@ -78,6 +82,8 @@ struct CrossStateMachine {
             break;
 
         case CrossState::In:
+            // A false entry may never see the loss of both edges expected at a real cross.
+            crossLostFrames = !crossFound && bothLinesLong ? crossLostFrames + 1 : 0;
             if (bothLinesShort) {
                 ++lostFrames;
                 recoveredFrames = 0;
@@ -88,21 +94,16 @@ struct CrossStateMachine {
             } else {
                 lostFrames = 0;
 
-                if (sawBothLinesLost &&
-                    leftCount >= shortLineCount &&
-                    rightCount >= shortLineCount) {
+                if (sawBothLinesLost && bothLinesLong) {
                     ++recoveredFrames;
                 } else {
                     recoveredFrames = 0;
                 }
             }
 
-            if (sawBothLinesLost && recoveredFrames >= recoveredConfirmFrames) {
-                state = CrossState::None;
-                seenFrames = 0;
-                lostFrames = 0;
-                recoveredFrames = 0;
-                sawBothLinesLost = false;
+            if (recoveredFrames >= recoveredConfirmFrames ||
+                crossLostFrames >= falseCrossRecoveryFrames) {
+                *this = CrossStateMachine{};
             }
             break;
         }

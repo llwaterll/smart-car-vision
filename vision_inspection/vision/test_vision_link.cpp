@@ -26,6 +26,12 @@ int main() {
             0xa5,0x5a,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7b,0x00,0x00,0xaf,0x75
         };
         check(hello == expectedHello, "HELLO frame matches expected v1 layout and CRC");
+        const auto status = vision_link::encodeCameraStatus(123, false);
+        const auto statusCrc = vision_link::crc16(status.data() + 2, status.size() - 4);
+        check(status.size() == 17 && status[3] == 3 && status[5] == 1 && status[11] == 123 &&
+              status[14] == 0 && status[15] == statusCrc >> 8 && status[16] == (statusCrc & 0xff) &&
+              vision_link::encodeCameraStatus(123, true)[14] == 1,
+              "camera status reports both conditions independently of business sequence");
         o.element = vision_link::Element::RedObstacle;
         o.confidence = 875;
         const auto red = vision_link::encodeTrack(7, 0x12345678, 30, o);

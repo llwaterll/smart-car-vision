@@ -6,6 +6,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include "img_handle.hpp"
 #include "gap_state.hpp"
 #include "obstacle_task.hpp"
@@ -35,7 +36,7 @@ void usage() {
         "  --http               enable browser viewer; open http://<board-ip>:8080/\n"
         "  --http-port N        browser viewer port, default 8080\n"
         "  --vision-uart DEV    live camera: send track and Sudoku tiles on UART (115200)\n"
-        "  --hello              send new-session HELLO; use only while F407 is STOPPED\n"
+        "  --hello              repeat this session's HELLO every second; start while F407 is STOPPED\n"
         "No actuator commands are transmitted. Inputs must be 640x480.\n";
 }
 
@@ -98,17 +99,13 @@ int main(int argc, char** argv) {
         // 摄像头用于实时观察；三种入口共用后面的同一处理链路。
         cv::VideoCapture capture;
         cv::Mat image;
+        const bool liveCamera = args.source == "--camera";
+        const int cameraIndex = liveCamera ? integer(args.path, "--camera", 0) : 0;
         if (args.source == "--image") {
             image = cv::imread(args.path, cv::IMREAD_COLOR);
             if (image.empty()) throw std::runtime_error("Cannot read image: " + args.path);
         } else if (args.source == "--video") {
             if (!capture.open(args.path)) throw std::runtime_error("Cannot open video: " + args.path);
-        } else {
-            const int index = integer(args.path, "--camera", 0);
-            if (!capture.open(index, cv::CAP_V4L2)) throw std::runtime_error("Cannot open camera");
-            capture.set(cv::CAP_PROP_FRAME_WIDTH, config::kInputWidth);
-            capture.set(cv::CAP_PROP_FRAME_HEIGHT, config::kInputHeight);
-            capture.set(cv::CAP_PROP_BUFFERSIZE, 1);
         }
         // 阶段 2：按需启用远程看图，并准备本次运行的输出目录和逐帧 CSV。
         // 输出目录必须是新目录，避免误覆盖已有测试结果。
@@ -122,7 +119,7 @@ int main(int argc, char** argv) {
             if (visionSession == 0) visionSession = 1;
             visionSender = std::make_unique<vision_link::SerialSender>(args.visionUart, visionSession);
             std::cerr << "Vision UART enabled at 115200 8N1; verify F407 is STOPPED before --hello.\n";
-            if (args.sendHello) visionSender->sendHello();
+            visionSender->startCameraStatus();
         }
         if (args.tcp) remote.enable();
         if (args.http) remote.enableHttp(static_cast<uint16_t>(args.httpPort));
@@ -142,6 +139,9 @@ int main(int argc, char** argv) {
         using Clock = std::chrono::steady_clock;
         const auto start = Clock::now();
         double processTotalMs = 0;
+        auto nextHello = Clock::time_point::min();
+        bool helloSent = false;
+        bool cameraWarning = false;
         // 阶段 3：逐帧处理。记录来源时间和处理耗时；CSV 对每帧留档，
         // 图片按 saveEvery 抽样，减少长视频产生的磁盘占用。
         while (args.maxFrames == 0 || frames < args.maxFrames) {
@@ -150,30 +150,59 @@ int main(int argc, char** argv) {
             if (args.source == "--image") {
                 if (frames > 0) break;
                 current = image;
+            } else if (liveCamera) {
+                const char* cameraError = nullptr;
+                if (!capture.isOpened()) {
+                    if (capture.open(cameraIndex, cv::CAP_V4L2)) {
+                        capture.set(cv::CAP_PROP_FRAME_WIDTH, config::kInputWidth);
+                        capture.set(cv::CAP_PROP_FRAME_HEIGHT, config::kInputHeight);
+                        capture.set(cv::CAP_PROP_BUFFERSIZE, 1);
+                    } else {
+                        cameraError = "Cannot open camera";
+                    }
+                }
+                if (!cameraError && (!capture.read(current) || current.empty()))
+                    cameraError = "Input read failed";
+                if (cameraError) {
+                    if (!visionSender) throw std::runtime_error(cameraError);
+                    visionSender->setCameraStreaming(false);
+                    if (!cameraWarning) std::cerr << cameraError << "; retrying camera.\n";
+                    cameraWarning = true;
+                    capture.release();
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+                cameraWarning = false;
+                if (visionSender) visionSender->setCameraStreaming(true);
+                sourceMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
             } else {
                 if (!capture.read(current) || current.empty()) {
-                    if (args.source == "--camera" || frames == 0) throw std::runtime_error("Input read failed");
+                    if (frames == 0) throw std::runtime_error("Input read failed");
                     break; // end of a decoded video
                 }
-                sourceMs = args.source == "--video" ? capture.get(cv::CAP_PROP_POS_MSEC) :
-                    std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+                sourceMs = capture.get(cv::CAP_PROP_POS_MSEC);
             }
             const auto frameReceived = Clock::now();
+            if (visionSender && args.sendHello && frameReceived >= nextHello && visionSender->sendHello()) {
+                helloSent = true;
+                nextHello = frameReceived + std::chrono::seconds(1);
+            }
+            const bool canSendBusiness = visionSender && (!args.sendHello || helloSent);
             const auto t0 = frameReceived;
+            options.sourceTimeMs = sourceMs;
             const auto result = img_handle(current, false, options);
             const auto frameReady = Clock::now();
             const double ms = std::chrono::duration<double, std::milli>(frameReady - t0).count();
             processTotalMs += ms;
             valid += result.pursuit.valid;
-            if (visionSender) {
+            if (canSendBusiness) {
                 // 这是当前进程可测的采集后年龄；不包含相机曝光前和 F407 接收队列延迟。
                 if (ms < 200) visionSender->sendTrack(static_cast<uint16_t>(std::ceil(ms)), result.wireObservation);
             }
             if (frames % 2 == 0) {
                 for (const auto& tile:tileReader.readAll(current)) {
                     const auto age = std::chrono::duration<double,std::milli>(Clock::now()-frameReceived).count();
-                    const bool sent = visionSender && age <= 200;
-                    if (sent)
+                    const bool sent = canSendBusiness && age <= 200 &&
                         visionSender->sendTile(static_cast<uint16_t>(std::ceil(age)),tile.index,tile.cells);
                     if (sudokuCsv.is_open()) {
                         sudokuCsv << frames << ',' << unsigned(tile.index);

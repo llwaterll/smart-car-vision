@@ -8,9 +8,11 @@
  *   1. CarVision_Crc16()        ：CRC-16/CCITT-FALSE 逐字节累计；
  *   2. CarVision_Init()         ：清会话、序号、统计和全部缓存；
  *   3. CarVision_Invalidate()   ：接收异常时作废半帧与道路观测（保留数独块）；
- *   4. CarVision_Feed()         ：同步 + 长度校验 + CRC + 业务字段校验 + 入缓存；
- *   5. CarVision_GetObservation()：按 200 ms 时效取道路观测快照；
- *   6. CarVision_GetTile()      ：按索引取 3×3 数独子块。
+ *   4. CarVision_CloseRaceSession()：一轮结束后作废会话，允许同会话重新 HELLO；
+ *   5. CarVision_GetCameraStatus()：取摄像头状态（独立于比赛会话）；
+ *   6. CarVision_Feed()         ：同步 + 长度校验 + CRC + 业务字段校验 + 入缓存；
+ *   7. CarVision_GetObservation()：按 200 ms 时效取道路观测快照；
+ *   8. CarVision_GetTile()      ：按索引取 3×3 数独子块。
  *
  * 设计要点
  *   - 只认已验证会话的业务帧，HELLO 只允许在停车时绑定；
@@ -155,8 +157,42 @@ void CarVision_Invalidate(CarVision *v)
 {
     v->used = 0;                  /* 清空未消费字节 */
     v->have_observation = 0;      /* 道路观测失效 */
+    v->camera_status = VISION_CAMERA_UNKNOWN; /* 串口异常后不再相信旧状态 */
     /* Collected tiles are persistent evidence for this session. Only a new
      * HELLO clears them; a later UART fault must not erase an earlier tile. */
+}
+
+/*
+ * 函数名称：CarVision_CloseRaceSession
+ * 函数功能：结束一轮比赛，作废会话、道路观测和数独块。
+ * 参数说明：v —— 视觉解析器对象。
+ * 返回参数：无。
+ * 备注信息：保留诊断统计和最近序号。停车并完成收尾后调用；发送端不需要
+ *           重启，下一次停车状态下的 HELLO（即使会话号相同）会重新绑定，
+ *           但必须等新的道路帧才能用于发车。
+ */
+void CarVision_CloseRaceSession(CarVision *v)
+{
+    v->used = 0;
+    v->have_observation = 0;
+    v->session_valid = 0;
+    memset(v->tiles, 0, sizeof v->tiles);
+    /* Retain diagnostics and the sequence watermark for this sender. */
+}
+
+/*
+ * 函数名称：CarVision_GetCameraStatus
+ * 函数功能：取最近的摄像头状态，超过 1 s 没收到状态帧就按未知处理。
+ * 参数说明：v      —— 视觉解析器对象；
+ *           now_ms —— 当前毫秒时间。
+ * 返回参数：VISION_CAMERA_UNKNOWN / NO_FRAME / STREAMING。
+ * 备注信息：摄像头状态帧不要求绑定比赛会话，视觉程序在相机打不开时仍会
+ *           持续发送故障状态，便于和“整条视觉链路断了”区分开。
+ */
+CarVisionCameraStatus CarVision_GetCameraStatus(const CarVision *v, uint32_t now_ms)
+{
+    return (uint32_t)(now_ms - v->camera_status_ms) <= VIS_STATUS_TIMEOUT_MS ?
+           v->camera_status : VISION_CAMERA_UNKNOWN;
 }
 
 /*
@@ -218,32 +254,41 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
 
     if (type == 0 && len == 0 && age == 0)
     {
-        /* HELLO：声明新会话；停车状态之外不允许切换会话。 */
+        /* 周期重发的同会话 HELLO 不刷新观测、不推进序号，也不改计数。 */
+        if (v->session_valid && v->session == session)
+        {
+            return;
+        }
+
+        /* 只有停车且未在收尾时才允许绑定新会话。 */
         if (!allow_hello)
         {
             v->rejected_frames++;
             return;
         }
 
-        /*
-         * 新会话清空旧观测、数独块与序号；
-         * 同一会话重复发送 HELLO 不重置已有历史。
-         */
-        if (!v->session_valid || v->session != session)
+        v->have_observation = 0;
+        if (v->session != session) v->have_sequence = 0;
+        for (i = 0; i < 4; i++)
         {
-            v->have_observation = 0;                /* 旧观测失效 */
-            v->have_sequence = 0;                   /* 旧序号失效 */
-
-            for (i = 0; i < 4; i++)
-            {
-                v->tiles[i].valid = 0;              /* 四块数独数据失效 */
-            }
-
-            v->session = session;                   /* 绑定新会话 */
-            v->session_valid = 1;
+            v->tiles[i].valid = 0;
         }
-
+        v->session = session;
+        v->session_valid = 1;
         v->accepted_frames++;
+        return;
+    }
+
+    /* STATUS 仅用于显示。即使未绑定比赛会话，也可报告相机故障。 */
+    if (type == 3)
+    {
+        if (len != 1 || seq != 0 || age != 0 || p[0] > 1U)
+        {
+            v->rejected_frames++;
+            return;
+        }
+        v->camera_status = p[0] ? VISION_CAMERA_STREAMING : VISION_CAMERA_NO_FRAME;
+        v->camera_status_ms = now;
         return;
     }
 
@@ -282,7 +327,8 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
          * 即使某有效位未置位，对应线上数值仍须在协议范围内；
          * 保留字段必须为 0，防止协议扩展时旧程序误读。
          */
-        if (flags > 15U ||
+        if (flags > 31U ||
+            ((flags & VISION_CURVATURE_ESTIMATED) && !(flags & VISION_CURVATURE_VALID)) ||
             confidence > 1000U ||
             lateral < -1000 || lateral > 1000 ||
             heading < -3142 || heading > 3142 ||

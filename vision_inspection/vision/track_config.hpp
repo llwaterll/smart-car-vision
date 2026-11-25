@@ -23,6 +23,7 @@ constexpr float kRoadHalfWidth = 96.f;
 
 // 预瞄
 constexpr float kLookahead = 80.f;
+constexpr float kStraightLookahead = 140.f;
 constexpr float kMetersPerPixel = 0.45/192.f;
 constexpr float kWheelBaseMeters = 0.152f;
 } // namespace config

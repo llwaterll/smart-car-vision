@@ -1,6 +1,7 @@
 #include "img_handle.hpp"
 #include "sudoku_reader.hpp"
 #include "vision_serial.hpp"
+#include <poll.h>
 #include <pty.h>
 extern "C" {
 #include "Car_Race.h"
@@ -8,7 +9,49 @@ extern "C" {
 #include <cassert>
 #include <iostream>
 
+static void checkSerialBackpressure() {
+    int master, slave;
+    char path[128];
+    assert(openpty(&master, &slave, path, nullptr, nullptr) == 0);
+    vision_link::SerialSender uart(path, 123);
+    assert(uart.sendHello());
+
+    unsigned sentTracks = 0;
+    while (sentTracks < 4096 && uart.sendTrack(10, {})) ++sentTracks;
+    assert(sentTracks > 0 && sentTracks < 4096);
+
+    CarVision rx;
+    CarVision_Init(&rx);
+    const auto receiveUntil = [&](unsigned sequence) {
+        while (rx.last_sequence != sequence) {
+            pollfd ready{master, POLLIN, 0};
+            assert(::poll(&ready, 1, 1000) == 1);
+            uint8_t bytes[256];
+            const auto n = ::read(master, bytes, sizeof(bytes));
+            assert(n > 0);
+            for (ssize_t i = 0; i < n; ++i) CarVision_Feed(&rx, bytes[i], 40, 1);
+        }
+    };
+    receiveUntil(sentTracks);
+
+    // Model a truncated write in front of the next complete frame.
+    const auto partial = vision_link::encodeTrack(sentTracks + 1, 123, 10, {});
+    assert(::write(slave, partial.data(), 10) == 10);
+    assert(uart.sendTrack(10, {}));
+    receiveUntil(sentTracks + 1);
+    CarVisionObservation resumed{};
+    assert(CarVision_GetObservation(&rx, 40, &resumed) && resumed.sequence == sentTracks + 1);
+
+    ::close(master);
+    bool fatal = false;
+    try { uart.sendHello(); }
+    catch (const std::runtime_error&) { fatal = true; }
+    assert(fatal);
+    ::close(slave);
+}
+
 int main(int argc, char** argv) {
+    checkSerialBackpressure();
     resetVisionState();
     ProcessOptions options;
     options.mode=TrackMode::Hsv;
@@ -112,5 +155,5 @@ int main(int argc, char** argv) {
     assert(multi.readAll(cv::Mat(400,1000,CV_8UC3,cv::Scalar(255,255,255))).empty());
     assert(multi.readAll(both).empty()); // a missed observation resets confirmation
     ::close(master); ::close(slave);
-    std::cout<<"PASS camera to UART to wheels; four AprilTag/OCR tiles to F407 puzzle solution; multi-tile frames\n";
+    std::cout<<"PASS UART backpressure and recovery; camera to UART to wheels; four AprilTag/OCR tiles to F407 puzzle solution; multi-tile frames\n";
 }

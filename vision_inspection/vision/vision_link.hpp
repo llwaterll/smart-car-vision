@@ -13,6 +13,7 @@ constexpr std::uint8_t kVersion = 1;
 constexpr std::uint8_t kTypeHello = 0;
 constexpr std::uint8_t kTypeTrack = 1;
 constexpr std::uint8_t kTypeSudokuTile = 2;
+constexpr std::uint8_t kTypeCameraStatus = 3;
 constexpr std::size_t kTrackPayloadSize = 16;
 constexpr std::size_t kTrackFrameSize = 32; // 2 sync + 12 header + 16 payload + 2 CRC
 
@@ -26,7 +27,8 @@ enum ValidMask : std::uint16_t {
     LateralValid = 1u << 0,
     HeadingValid = 1u << 1,
     CurvatureValid = 1u << 2,
-    DistanceValid = 1u << 3
+    DistanceValid = 1u << 3,
+    CurvatureEstimated = 1u << 4
 };
 
 // Fields use the units/ranges defined by the control repository's TYPE=1 contract.
@@ -69,7 +71,8 @@ inline std::uint16_t crc16(const std::uint8_t* data, std::size_t size) {
 }
 
 inline void validate(const TrackObservation& o) {
-    if (o.validMask > 15 || o.confidence > 1000 ||
+    if (o.validMask > 31 || ((o.validMask & CurvatureEstimated) && !(o.validMask & CurvatureValid)) ||
+        o.confidence > 1000 ||
         o.lateralMm < -1000 || o.lateralMm > 1000 ||
         o.headingMrad < -3142 || o.headingMrad > 3142 ||
         o.curvatureMilli < -20000 || o.curvatureMilli > 20000 ||
@@ -117,6 +120,19 @@ inline std::vector<std::uint8_t> encodeHello(std::uint32_t session) {
     appendU16(out, 0); // HELLO sequence is defined as zero.
     appendU32(out, session);
     appendU16(out, 0); // HELLO age is defined as zero.
+    appendU16(out, crc16(out.data() + 2, out.size() - 2));
+    return out;
+}
+
+// Diagnostic only. Zero sequence and age keep it separate from race observations.
+inline std::vector<std::uint8_t> encodeCameraStatus(std::uint32_t session, bool streaming) {
+    if (session == 0) throw std::invalid_argument("Vision session must be nonzero");
+    std::vector<std::uint8_t> out{0xa5,0x5a,kVersion,kTypeCameraStatus};
+    appendU16(out, 1);
+    appendU16(out, 0);
+    appendU32(out, session);
+    appendU16(out, 0);
+    out.push_back(streaming ? 1 : 0);
     appendU16(out, crc16(out.data() + 2, out.size() - 2));
     return out;
 }

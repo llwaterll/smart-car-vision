@@ -1,0 +1,3 @@
+# 仅更新 CODE/Drv_Lcd_FontZh.h（Tools/gen_zh_font.py）时需要。
+# 只复用/裁剪已有字模时不装也能运行；新增中文并首次渲染时才需要 Pillow。
+pillow>=9.1

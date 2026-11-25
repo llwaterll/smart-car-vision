@@ -176,6 +176,18 @@ static bird::RingStateMachine ringMachine;
 static task::GapStateMachine gapMachine;
 static obstacle::Stabilizer obstacleStabilizer;
 static obstacle_task::Machine obstacleTaskMachine;
+struct LaneMemory {
+    double measuredAtMs = -1.0;
+    float width = 0.f, measuredCenter = 0.f, lastCenter = 0.f;
+    int seedY = -1, leftSeed = -1, rightSeed = -1;
+    unsigned estimatedFrames = 0;
+
+    bool canEstimate(double nowMs) const {
+        return measuredAtMs >= 0.0 && nowMs > measuredAtMs &&
+               nowMs - measuredAtMs <= 250.0 && estimatedFrames < 4;
+    }
+};
+static LaneMemory laneMemory;
 // 图像处理入口可选择原灰度算法或新增 HSV 前端，便于同一数据集对比。
 enum class TrackMode { Gray, Hsv };
 struct ProcessOptions {
@@ -187,6 +199,7 @@ struct ProcessOptions {
     std::uint32_t obstacleAckEventId = 0; // 控制层正在确认的路障事件编号。
     obstacle_task::Ack obstacleAck = obstacle_task::Ack::None; // 控制层对事件的接收/完成/拒绝反馈。
     bool obstacleTaskInputProvided = false; // 收到有效圈数和确认数据后设为 true。
+    double sourceTimeMs = -1.0;
 };
 // 每帧结果包：保存巡线/场景/预瞄输出和可视化中间图，供回放日志使用。
 struct FrameResult {
@@ -213,6 +226,7 @@ inline void resetVisionState() {
     gapMachine.reset();
     obstacleStabilizer.reset();
     obstacleTaskMachine.reset();
+    laneMemory = {};
 }
 // 单帧主处理链：图像检查与预处理 -> 选择前端并跟踪左右边线 -> 鸟瞰映射/
 // 平滑/重采样 -> 识别十字和环岛并选中线 -> 预瞄及 Pure Pursuit -> 调试输出。
@@ -263,11 +277,35 @@ inline FrameResult img_handle(const cv::Mat& img, bool saveBirdImage = false,
     }
     result.seedFound = seedY >= 0;
     result.seedY = seedY;
+    const bool hsv = options.mode == TrackMode::Hsv;
+    bool blueGap = false;
+    if (!result.seedFound && !result.blueMask.empty()) {
+        const cv::Mat near = result.blueMask(cv::Rect(160,380,320,100));
+        blueGap = cv::countNonZero(near) > 0.85 * near.total();
+    }
+    const bool inGap = gapMachine.current().phase == task::GapPhase::Crossing ||
+                       gapMachine.current().phase == task::GapPhase::Recovering;
+    const bool canEstimate = hsv && !blueGap && !inGap &&
+        crossMachine.state == bird::CrossState::None && ringMachine.state == bird::RingState::None &&
+        laneMemory.canEstimate(options.sourceTimeMs);
+    bool singleSeed = false;
+    if (!result.seedFound && canEstimate) {
+        const auto seed = track::findSingleEdgeSeed(result.mask, result.blueMask, options.frontend,
+            laneMemory.seedY, laneMemory.leftSeed, laneMemory.rightSeed);
+        if (seed.side == 1)
+            leftLine = mazeWalk(result.mask, seed.x + 1, seed.y, 1, true);
+        else if (seed.side == -1)
+            rightLine = mazeWalk(result.mask, seed.x - 1, seed.y, -1, true);
+        singleSeed = seed.side != 0;
+    }
     // 路障单独处理，不混入白色赛道掩膜：先按颜色和形状找候选，再跨帧关联。
     // 输出坐标仍是图像像素；此处不根据颜色触发绕行或停车动作。
     result.obstacles = obstacleStabilizer.update(obstacle::detect(img));
+    const bool haveRoadContext = result.seedFound || singleSeed;
+    const bool reportObstacle = haveRoadContext && result.obstacles.hasPrimary &&
+                                result.obstacles.primary.stable;
     // 将稳定主目标映射为控制仓库定义的 TYPE=1 元素码；未标定字段保持无效。
-    if (result.obstacles.hasPrimary && result.obstacles.primary.stable) {
+    if (reportObstacle) {
         const auto& target = result.obstacles.primary;
         const auto color = target.color == obstacle::Color::Green ? vision_link::Element::GreenObstacle :
             target.color == obstacle::Color::Yellow ? vision_link::Element::YellowObstacle :
@@ -284,7 +322,7 @@ inline FrameResult img_handle(const cv::Mat& img, bool saveBirdImage = false,
         taskInput.ackEventId = options.obstacleAckEventId;
         taskInput.ack = options.obstacleAck;
         for (const auto& candidate : result.obstacles.candidates) {
-            if (candidate.stable) taskInput.targets.push_back(candidate);
+            if (haveRoadContext && candidate.stable) taskInput.targets.push_back(candidate);
         }
         result.obstacleEvent = obstacleTaskMachine.update(taskInput);
     } else {
@@ -422,28 +460,50 @@ if (hasPreview) {
     /* On ordinary road, use the midpoint of the two measured boundaries at
      * the same ground-plane lookahead. This removes single-edge width bias.
      * Element states retain their dedicated continuation through the junction. */
+    bool estimated = false;
     if (state == bird::CrossState::None && ringState == bird::RingState::None) {
         float xLeft=0, xRight=0;
         const float y=vehiclePoint.y-lookahead;
-        auto intersect=[y](const auto& edge,float& x) {
-            for (size_t i=1;i<edge.size();++i) {
-                const auto& a=edge[i-1]; const auto& b=edge[i];
-                if (a.y>=y && b.y<y) {
-                    x=a.x+(b.x-a.x)*(y-a.y)/(b.y-a.y);
-                    return true;
-                }
+        const bool hasLeft = bird::sampleEdgeAtY(sampleL,y,xLeft);
+        const bool hasRight = bird::sampleEdgeAtY(sampleR,y,xRight);
+        const float width = (xRight - xLeft) * config::kMetersPerPixel;
+        const bool measured = hasLeft && hasRight && width > 0.22f && width < 0.72f;
+        if (measured) {
+            previewPoint = {(xLeft + xRight) * 0.5f, y};
+            if (hsv && result.seedFound && !inGap) {
+                laneMemory = {options.sourceTimeMs, xRight - xLeft, previewPoint.x,
+                              previewPoint.x, seedY, leftX, rightX, 0};
+                previewPoint = bird::straightRoadPreview(sampleL, sampleR, vehiclePoint,
+                                                        previewPoint, xRight - xLeft);
             }
-            return false;
-        };
-        if (intersect(sampleL,xLeft) && intersect(sampleR,xRight)) {
-            const float width=(xRight-xLeft)*config::kMetersPerPixel;
-            if (width>0.22f && width<0.72f) {
-                previewPoint={(xLeft+xRight)*0.5f,y};
-                pp=control::calculatePurePursuit(vehiclePoint,previewPoint,config::kMetersPerPixel,config::kWheelBaseMeters);
-                hasPreview=pp.valid;
-                previewAngle=bird::calculatePreviewAngle(vehiclePoint,previewPoint);
+        } else if (canEstimate && (hasLeft != hasRight) &&
+                   (singleSeed || result.seedFound) && (hasLeft ? sampleL.size() : sampleR.size()) >= 8) {
+            const float inferredCenter = hasLeft ? xLeft + laneMemory.width * 0.5f :
+                                                  xRight - laneMemory.width * 0.5f;
+            estimated = std::abs(inferredCenter - laneMemory.lastCenter) * config::kMetersPerPixel <= 0.10f &&
+                        std::abs(inferredCenter - laneMemory.measuredCenter) * config::kMetersPerPixel <= 0.18f;
+            if (estimated) {
+                previewPoint = {inferredCenter, y};
+                laneMemory.lastCenter = inferredCenter;
+                ++laneMemory.estimatedFrames;
+                selected.side = hasLeft ? "ESTIMATE_LEFT" : "ESTIMATE_RIGHT";
+                selectedCenter = nullptr;
             }
         }
+        if (measured || estimated) {
+            pp = control::calculatePurePursuit(vehiclePoint, previewPoint, config::kMetersPerPixel,
+                                               config::kWheelBaseMeters);
+            hasPreview = pp.valid;
+            previewAngle = bird::calculatePreviewAngle(vehiclePoint,previewPoint);
+        } else if (hsv) {
+            laneMemory = {};
+            if (sampleL.size() < 8 || sampleR.size() < 8) {
+                hasPreview = false;
+                pp = {};
+            }
+        }
+    } else {
+        laneMemory = {};
     }
     // 阶段 5：把左右推算中线、选用中线、预瞄点和状态画在鸟瞰图上，
     // 并把当前帧结果封装返回给离线日志或上层调用者。
@@ -472,7 +532,7 @@ if (hasPreview) {
     result.selectedSide = selected.side;
     result.pursuit = pp;
     auto& wire = result.wireObservation;
-    if (result.seedFound && pp.valid && std::abs(pp.lateralError) <= 1.f &&
+    if ((result.seedFound || estimated) && pp.valid && std::abs(pp.lateralError) <= 1.f &&
         std::abs(pp.curvature) <= 20.f) {
         wire.validMask |= vision_link::LateralValid | vision_link::CurvatureValid;
         wire.lateralMm = static_cast<int16_t>(std::lround(-1000.f * pp.lateralError));
@@ -482,8 +542,12 @@ if (hasPreview) {
             if (state != bird::CrossState::None) wire.element = vision_link::Element::Cross;
             else if (ringState != bird::RingState::None) wire.element = vision_link::Element::Ring;
         }
+        if (estimated) {
+            wire.validMask |= vision_link::CurvatureEstimated;
+            wire.confidence = 450;
+        }
     }
-    if (result.obstacles.hasPrimary && result.obstacles.primary.stable) {
+    if (reportObstacle) {
         std::vector<cv::Point2f> ground;
         bird::transformPoints({cv::Point(result.obstacles.primary.center)},ground);
         if (!ground.empty()) {
@@ -493,12 +557,9 @@ if (hasPreview) {
                 wire.validMask |= vision_link::DistanceValid;
             }
         }
-    } else if (!result.seedFound && !result.blueMask.empty()) {
-        const cv::Mat near = result.blueMask(cv::Rect(160,380,320,100));
-        if (cv::countNonZero(near) > 0.85 * near.total()) {
-            wire.element = vision_link::Element::Gap;
-            wire.confidence = 850;
-        }
+    } else if (blueGap) {
+        wire.element = vision_link::Element::Gap;
+        wire.confidence = 850;
     }
     result.overlay = vis; result.birdImage = birdView;
     if (!result.obstacles.overlay.empty()) remote.imshow("obstacles", result.obstacles.overlay);

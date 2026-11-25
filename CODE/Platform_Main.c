@@ -73,6 +73,7 @@ static uint8_t result_status;
 static uint8_t finish_tiles[4][9];
 static volatile uint8_t finish_pending, finish_ready;
 static uint32_t finish_started_ms, finish_still_ms, display_session;
+static uint32_t race_session;    /* 本场比赛绑定的视觉会话；0 表示没有进行中的轮次 */
 static uint8_t finish_timing, finish_tile_mask;
 
 /* 整车是否静止（停车且双轮转速近似为零），陀螺零偏标定用。 */
@@ -80,6 +81,69 @@ static volatile uint8_t chassis_still;
 
 /* 平台层请求标志：写参数、时基重挂、菜单整屏重画。 */
 static volatile uint8_t params_pending, params_rebase, menu_refresh;
+
+/* ---------------------------------------------------------------------------
+ * 独立看门狗
+ * 功能：主循环约 4 s 不喂狗就复位，把“卡在某个忙等/死循环”变成可恢复的重启。
+ * 取值：LSI 约 32 kHz，PR=4（/64）得 500 Hz，RLR=2000 -> 4 s。
+ * 注意：4 s 大于内部 Flash 擦除时间（约 1~2 s），保存参数不会误复位；
+ *       调试 halt 时通过 DBGMCU 冻结计数，不会被看门狗打断。
+ *       只允许在主循环末尾喂狗：卡在主循环调用的任何函数里就不会喂。
+ * ------------------------------------------------------------------------- */
+#define IWDG_RELOAD_COUNT   2000U
+
+static void iwdg_start(void)
+{
+    __HAL_DBGMCU_FREEZE_IWDG();
+    IWDG->KR = 0x5555U;             /* 解锁 PR/RLR */
+    IWDG->PR = 4U;                  /* LSI/64 -> 500 Hz */
+    IWDG->RLR = IWDG_RELOAD_COUNT;  /* 2000 / 500 = 4 s */
+    IWDG->KR = 0xCCCCU;             /* 启动；启动后不能关闭 */
+}
+
+static inline void iwdg_feed(void)
+{
+    IWDG->KR = 0xAAAAU;
+}
+
+/* ---------------------------------------------------------------------------
+ * 状态灯
+ * 功能：心跳灯每 500 ms 翻转；按键灯在每次按下时闪 1~4 下。
+ * 取值：UP/DOWN/OK/BACK 分别对应 1/2/3/4 下，每下约 150 ms。
+ * 注意：只在 PIT 中断里调用，不和主循环抢 GPIO。
+ * ------------------------------------------------------------------------- */
+static unsigned key_led_elapsed_ms;
+static unsigned key_led_toggles;
+
+static void status_led_key(uint8_t id)
+{
+    if (id >= KEY_NUM) {
+        return;
+    }
+    key_led_elapsed_ms = 0U;
+    key_led_toggles = 2U * ((unsigned)id + 1U) - 1U;   /* 1/3/5/7 次翻转 = 1~4 个脉冲 */
+    NEUQ_GPIO_write(BOARD_KEY_LED_PIN, GPIO_High);
+}
+
+static void status_led_tick(void)
+{
+    static unsigned heartbeat_elapsed_ms;
+
+    heartbeat_elapsed_ms += BOARD_PERIOD_MS;
+    if (heartbeat_elapsed_ms >= 500U) {
+        heartbeat_elapsed_ms -= 500U;
+        NEUQ_GPIO_toggle(BOARD_HEARTBEAT_LED_PIN);
+    }
+
+    if (key_led_toggles) {
+        key_led_elapsed_ms += BOARD_PERIOD_MS;
+        if (key_led_elapsed_ms >= 150U) {
+            key_led_elapsed_ms -= 150U;
+            NEUQ_GPIO_toggle(BOARD_KEY_LED_PIN);
+            --key_led_toggles;
+        }
+    }
+}
 
 /*
  * 函数名称：copy_tiles
@@ -235,6 +299,10 @@ static void poll_menu(void)
         view.vision_ok = vision.accepted_frames;
         view.vision_bad = vision.bad_frames;
         view.vision_rejected = vision.rejected_frames;
+        view.vision_enabled = (uint8_t)BOARD_VISION_ENABLE;
+        view.camera_status = CarVision_GetCameraStatus(&vision, now);
+        view.pi_connected = (uint8_t)(!Uart_VisionFault() &&
+            (view.camera_status != VISION_CAMERA_UNKNOWN || view.fresh));
         view.tile_mask = (result_status == SUDOKU_COLLECTING || result_status == SUDOKU_WAITING) ?
             copy_tiles(NULL, now) : finish_tile_mask;
         shown_result = result_status;
@@ -272,6 +340,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
 
     chassis_still = still && car.state == CAR_STOP;
     up = (NEUQ_GPIO_read(KEY_UP_PIN) == GPIO_Low) ? 1U : 0U;
+    status_led_tick();                              /* 心跳/按键灯，每 5 ms 推进一步 */
 
     scan_ms += BOARD_PERIOD_MS;
     if (scan_ms >= KEY_SCAN_PERIOD_MS)
@@ -297,14 +366,30 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
         Car_LocalStop(&car);
     }
 
+    /* 停车且收尾完成后结束本轮视觉会话：发送端不必重启，下一次 HELLO
+     * 即使会话号相同也能重新绑定，但必须等新的实测道路帧才能发车。 */
+    if (car.state == CAR_STOP && !finish_pending && race_session != 0U)
+    {
+        if (vision.session_valid && vision.session == race_session)
+        {
+            CarVision_CloseRaceSession(&vision);
+            fresh = 0;
+        }
+        race_session = 0U;
+    }
+
     menu_start = Menu_StartCondition(&car, still, finish_pending,
                                      (fresh && !Uart_VisionFault()) ? &o : NULL,
-                                     display_session);
+                                     race_session);
 
     while (Key_GetEvent(&key))
     {
         MenuAction action;
 
+        if (key.type == KEY_EVENT_PRESS)
+        {
+            status_led_key(key.id);                 /* 每个键按下闪 1~4 下 */
+        }
         if (stop_release_ms || (up && key.id != KEY_UP))
         {
             continue;
@@ -321,6 +406,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
         {
             Track_Start(&track);
             display_session = o.session;
+            race_session = o.session;
             result_status = SUDOKU_COLLECTING;
             menu_start = START_STOP_FIRST;
         }
@@ -392,7 +478,7 @@ static void poll_params(void)
     /* 前台执行：保留中断以便 HAL 超时；PIT 已被上方条件挡住；
      * 串口入队暂停，避免把 Flash 阻塞期间堆积的字节当成命令。 */
     Uart_Gate(1);
-    Lcd_Print(3, UI_STYLE_WARN, "Saving... keep power on");
+    Lcd_Print(3, UI_STYLE_WARN, "保存中...请勿断电");
     status = CarParams_FlashSave(&current);
     Uart_Gate(0);
 
@@ -683,6 +769,7 @@ void Car_Main(void)
     NEUQ_Debug_set_output_enabled(0);
 
     Car_Init(&car);                                  /* 控制对象复位到 STOP */
+    Menu_Init(&menu);                                /* 链表式菜单复位到组页 */
     loaded = CarParams_Load(&CarParams_FlashIO, &saved_params);
     params_saved = (uint8_t)(loaded == 1 && CarParams_Apply(&car, &saved_params));
     menu.params_status = params_saved ? PARAMS_LOADED :
@@ -706,6 +793,9 @@ void Car_Main(void)
     NEUQ_Uart_Enable_RX_Interrupt((UART_DEV_ENUM)BOARD_UART_VIS_INDEX, 4);
 #endif
 
+    NEUQ_GPIO_init(BOARD_HEARTBEAT_LED_PIN, GPIO_Mode_Output_PushPull, GPIO_Low);
+    NEUQ_GPIO_init(BOARD_KEY_LED_PIN, GPIO_Mode_Output_PushPull, GPIO_Low);
+
     Lcd_Init();
     Gyro_Init();
 
@@ -718,6 +808,7 @@ void Car_Main(void)
     Clock_Init();
 
     NEUQ_PIT_init_ms(PIT_CH1, BOARD_PERIOD_MS);
+    iwdg_start();                                    /* 初始化完成后再启动 4 s 看门狗 */
 
     /* 控制和按键由 PIT 驱动，慢速外设分次在主循环推进。 */
     for (;;)
@@ -725,6 +816,8 @@ void Car_Main(void)
         poll_params();
         Vofa_Poll();
         Gyro_Poll(chassis_still);
+        Lcd_Poll(HAL_GetTick());                     /* 周期整屏重画 / SPI 超时后重初始化 */
         poll_menu();
+        iwdg_feed();                                 /* 只有主循环完整走完一轮才喂狗 */
     }
 }

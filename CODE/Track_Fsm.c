@@ -145,7 +145,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     float ds = 0.5f * (dl + dr);               /* 本拍底盘前进距离：两轮平均，米 */
     float dyaw = (dr - dl) / TRACK_WIDTH_M;    /* 轮速差推算的本拍航向变化，rad */
     float s, curve, speed, heading, target, error, along; /* 赛段内里程/曲率/速度/航向/目标偏移/误差 */
-    int road, new_frame, in_window;            /* 是否看到路/是否新帧/断路入口是否在窗口内 */
+    int road, measured_road, new_frame, in_window; /* 看到路/实测路/新帧/断路窗口 */
 
     /* 完赛或已判故障后不再推进，重复调用保持停车输出。 */
     if (r->phase == TRACK_SEGMENT_FINISHED || r->phase == TRACK_SEGMENT_FAULT) return stop;
@@ -172,18 +172,25 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     /* ---- 视觉帧解析：区分“没有新帧”“有新帧但没看到路”两种情况 ---- */
     new_frame = 0;
     road = 0;
+    measured_road = 0;
     if (o) {
         /* 序号变化才算新帧：同一帧被多次调用不能重复触发赛段判定。 */
         new_frame = !r->have_sequence || o->sequence != r->last_sequence;
         r->last_sequence = o->sequence;
         r->have_sequence = 1;
 
-        /* 只有“曲率有效 + 置信度 ≥ 0.35”才算看到路；否则仍按丢线处理。 */
+        /* 只有“曲率有效 + 置信度 ≥ 0.35”才算看到路；否则仍按丢线处理。
+         * 单边补线的估计曲率只能用于普通巡线转向，不能用于发车、断路接回
+         * 或刷新丢线停车计时，所以另设 measured_road。 */
         road = (o->valid_mask & VISION_CURVATURE_VALID) && o->confidence >= 0.35f;
-        if (road) {
+        measured_road = road && !(o->valid_mask & VISION_CURVATURE_ESTIMATED);
+        if (measured_road || (road && r->phase == TRACK_SEGMENT_TRACK)) {
             r->last_curve = limit(o->curvature_inv_m, 15.0f);  /* 曲率限幅 15 /m，防脏数据 */
-            r->last_road_ms = now;
             r->have_curve = 1;
+        }
+        if (measured_road) {
+            r->last_measured_curve = r->last_curve;
+            r->last_road_ms = now;
         }
         /* 元素去重：同一元素在新帧里反复出现时，只有离开 0.8 m 后才允许再次触发。 */
         if (new_frame && o->element != r->held_element &&
@@ -208,7 +215,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
                 enter(r, TRACK_SEGMENT_GAP, now);
                 r->last_gap = r->distance;
             }
-        } else if ((o->valid_mask & VISION_DISTANCE_VALID) &&
+        } else if (measured_road && (o->valid_mask & VISION_DISTANCE_VALID) &&
                    o->element != r->held_element && o->confidence >= 0.50f) {
             /* 绕障：黄灯且距离 ≤0.80 m。obstacle_m 取测量值（最小 0.08 m），
              * goal_m 是“越过障碍再走 0.42 m”的总目标里程。 */
@@ -256,7 +263,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
         /* clear_frames 只在“新帧且 s≥1.30 m 且看到路”时累加，任何一帧不满足即清零，
          * 避免摄像头的单帧误检就提前结束盲走。 */
         if (new_frame) {
-            if (s >= 1.30f && road) ++r->clear_frames;
+            if (s >= 1.30f && measured_road) ++r->clear_frames;
             else r->clear_frames = 0;
         }
         if (r->clear_frames < 3) return drive(0.22f, limit(-3.0f * heading, 1.2f));
@@ -286,7 +293,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
         if (along > r->obstacle_m + 0.10f) target *= fmaxf(0, r->goal_m / 0.32f);
 
         /* 回到原线：纵向到位、看到路、横向偏差 <0.075 m 三条同时满足。 */
-        if (r->goal_m <= 0.02f && road && fabsf(r->offset) < 0.075f) {
+        if (r->goal_m <= 0.02f && measured_road && fabsf(r->offset) < 0.075f) {
             r->phase = TRACK_SEGMENT_TRACK;
             r->last_road_ms = now;
         } else {
@@ -298,7 +305,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     }
 
     /* ---- 正常巡线：丢线只降速不停车，除非显式配置了停车超时 ---- */
-    r->degraded = r->phase == TRACK_SEGMENT_TRACK && !road;
+    r->degraded = r->phase == TRACK_SEGMENT_TRACK && !measured_road;
 #if TRACK_VISION_LOST_STOP_MS > 0
     if (r->degraded && r->have_curve &&
         now - r->last_road_ms >= TRACK_VISION_LOST_STOP_MS) {
@@ -307,13 +314,15 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     }
 #endif
     curve = r->last_curve;
-    /* 直线累计：|曲率| < 1.75 /m 认为在直道，供断路判定使用；一进弯立刻清零。 */
-    r->straight_m = fabsf(curve) < 1.75f ? r->straight_m + fmaxf(0,ds) : 0;
+    /* 直线累计只看实测曲率：单边估计不能拿来确认断路入口。
+     * |曲率| < 1.75 /m 认为在直道，一进弯立刻清零。 */
+    r->straight_m = fabsf(r->last_measured_curve) < 1.75f ? r->straight_m + fmaxf(0,ds) : 0;
 
     /* 速度规划：v ≤ min(圈速上限, √(0.55/|k|))，即把横向加速度 a=v²|k| 限制在 0.55。
      * 第一圈上限 0.55 m/s、第二圈 0.32 m/s（第二圈更保守，因为要等红灯/终点）。 */
     speed = fminf(r->lap == 1 ? 0.55f : 0.32f, sqrtf(0.55f / (fabsf(curve) + 0.01f)));
-    if (!road) speed = fminf(speed, TRACK_HOLD_SPEED_MPS);   /* 丢线：降到保持速度 */
+    /* 丢线或只拿到单边估计：都降到保持速度，单边估计不能用于高速巡线。 */
+    if (r->degraded) speed = fminf(speed, TRACK_HOLD_SPEED_MPS);
     /* 低置信度或环岛/十字：再压到 0.24 m/s。o 为 NULL 时上面的保持速度已经兜底，
      * 所以这里只对“有帧”的情况再加限制。 */
     if (o && (o->confidence < 0.65f || o->element == VISION_ELEMENT_RING ||

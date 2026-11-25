@@ -14,6 +14,45 @@ struct CenterLineSelection {
     const std::vector<cv::Point2f>* line = nullptr;
     const char* side = "NONE";
 };
+
+inline bool sampleEdgeAtY(const std::vector<cv::Point2f>& edge, float y, float& x)
+{
+    for (std::size_t i = 1; i < edge.size(); ++i) {
+        const auto& a = edge[i - 1];
+        const auto& b = edge[i];
+        if (a.y >= y && b.y < y) {
+            x = a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y);
+            return true;
+        }
+    }
+    return false;
+}
+
+inline cv::Point2f straightRoadPreview(const std::vector<cv::Point2f>& left,
+                                       const std::vector<cv::Point2f>& right,
+                                       const cv::Point2f& vehicle, const cv::Point2f& near,
+                                       float nearWidth)
+{
+    if (!hasStraightCorridor(left, right)) return near;
+    const float farY = vehicle.y - config::kStraightLookahead;
+    float midX, farX;
+    const auto centerAt = [&](float y, float& center) {
+        float l, r;
+        if (!sampleEdgeAtY(left, y, l) || !sampleEdgeAtY(right, y, r)) return false;
+        const float width_m = (r - l) * config::kMetersPerPixel;
+        if (width_m <= 0.22f || width_m >= 0.72f ||
+            std::abs((r - l - nearWidth) * config::kMetersPerPixel) >= 0.06f) return false;
+        center = (l + r) * 0.5f;
+        return true;
+    };
+    /* Keep the short target on curves or without two measured boundaries.
+     * The longer target retains the measured lateral offset and heading. */
+    if (!centerAt((near.y + farY) * 0.5f, midX) || !centerAt(farY, farX) ||
+        std::abs(near.x + farX - 2.f * midX) * config::kMetersPerPixel > 0.008f)
+        return near;
+    return {farX, farY};
+}
+
 // 给候选中线评分：优先考虑向前延伸较远、横向跳变较小的那条线。
 inline float forwardLineScore(
     const std::vector<cv::Point2f>& line,

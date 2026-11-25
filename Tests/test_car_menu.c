@@ -8,15 +8,33 @@
 #include <stdio.h>
 #include <string.h>
 
-static char rows[LCD_ROWS][LCD_COLS+1];
+static char rows[LCD_ROWS][LCD_LINE_BYTES];
+
+/* 与 Drv_Lcd 的逻辑列规则一致：ASCII 1 列，UTF-8 汉字 2 列。 */
+static unsigned display_columns(const char *s)
+{
+    unsigned n = 0;
+    while (*s) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x80U) { n++; s++; }
+        else if ((c & 0xE0U) == 0xC0U) { n += 2; s += 2; }
+        else if ((c & 0xF0U) == 0xE0U) { n += 2; s += 3; }
+        else { n++; s++; }
+    }
+    return n;
+}
+
 void Lcd_Print(uint8_t row, UI_Style_Enum style, const char *fmt, ...)
 {
     va_list args;
+    int n;
     (void)style;
     assert(row < LCD_ROWS);
     va_start(args,fmt);
-    assert(vsnprintf(rows[row],sizeof rows[row],fmt,args) <= LCD_COLS);
+    n = vsnprintf(rows[row],sizeof rows[row],fmt,args);
     va_end(args);
+    assert(n >= 0 && n < (int)sizeof rows[row]);
+    assert(display_columns(rows[row]) <= LCD_COLS);
 }
 
 static MenuAction press(MenuState *m, Car_Core *c, unsigned key, StartCondition ready)
@@ -68,6 +86,10 @@ int main(void)
     assert(Menu_StartCondition(&car,1,0,&road,11) == START_NO_ROAD);
     road.confidence = 0.9f;
     assert(Menu_StartCondition(&car,1,0,&road,12) == START_NEW_SESSION);
+    /* Single-side estimated curvature may steer, but must never launch. */
+    road.valid_mask = VISION_CURVATURE_VALID | VISION_CURVATURE_ESTIMATED;
+    assert(Menu_StartCondition(&car,1,0,&road,11) == START_NO_ROAD);
+    road.valid_mask = VISION_CURVATURE_VALID;
 
     /* Entering either menu level must never start a motor. Long OK cannot launch. */
     assert(press(&menu,&car,KEY_OK,START_READY) == MENU_IDLE && menu.depth == 1);
@@ -117,6 +139,34 @@ int main(void)
     Menu_ShowResult(&menu);
     assert(menu.depth == 2 && menu.group == MENU_RACE && menu.item[MENU_RACE] == 2);
 
+    /* Menu_Init rebuilds the circular links and returns to the group page. */
+    Menu_Init(&menu);
+    assert(menu.depth == 0 && menu.group == MENU_RACE && menu.item[MENU_RACE] == 0);
+    assert(menu.node == MENU_RACE);
+
+    /* Corrupt indices are clamped, not followed out of the node table. */
+    menu.depth = 9;
+    menu.group = (uint8_t)(MENU_GROUPS + 5);
+    press(&menu,&car,KEY_OK,START_READY);
+    assert(menu.depth == 1 && menu.group == MENU_RACE);
+    memset(&menu,0,sizeof menu);
+    menu.depth = 1;
+    menu.group = MENU_RACE;
+    menu.item[MENU_RACE] = 99;
+    press(&menu,&car,KEY_UP,START_READY);
+    assert(menu.group == MENU_RACE && menu.item[MENU_RACE] < 3);
+
+    /* Invalid key ids and NULL objects are ignored instead of being dereferenced. */
+    {
+        Key_Event_Struct bad = {(uint8_t)KEY_NUM, KEY_EVENT_PRESS};
+        Key_Event_Struct ok = {KEY_OK, KEY_EVENT_PRESS};
+        assert(Menu_Key(&menu,bad,&car,START_READY) == MENU_IDLE);
+        assert(Menu_Key(NULL,ok,&car,START_READY) == MENU_IDLE);
+    }
+    assert(Menu_StartCondition(NULL,1,0,&road,11) == START_STOP_FIRST);
+    Menu_ShowResult(NULL);
+    Menu_DrawRow(NULL,0,board,0);
+
     /* Render every detail page through the actual formatter and fixed row width. */
     view.menu.depth = 2;
     view.samples = 100;
@@ -137,10 +187,10 @@ int main(void)
     view.menu.params_status=PARAMS_SAVED;
     view.params_saved=1; view.params_dirty=1;
     Menu_DrawRow(&view,4,board,0);
-    assert(strstr(rows[4],"Unsaved"));
+    assert(strstr(rows[4],"有未保存"));
     view.start=START_RESULT;
     Menu_DrawRow(&view,5,board,0);
-    assert(strstr(rows[5],"Wait for result"));
+    assert(strstr(rows[5],"请等待数独"));
     view.start=START_READY;
     view.menu.group = MENU_SENSORS;
     view.menu.item[MENU_SENSORS] = 1;
@@ -151,13 +201,55 @@ int main(void)
     view.menu.item[MENU_RACE] = 2;
     view.tile_mask = 5;
     Menu_DrawRow(&view,2,board,SUDOKU_AMBIGUOUS);
-    assert(strstr(rows[2],"Multiple"));
+    assert(strstr(rows[2],"存在多解"));
     Menu_DrawRow(&view,3,board,SUDOKU_MISSING);
-    assert(strstr(rows[3],"received"));
+    assert(strstr(rows[3],"已收"));
     Menu_DrawRow(&view,4,board,SUDOKU_MISSING);
-    assert(strstr(rows[4],"missing"));
+    assert(strstr(rows[4],"缺失"));
     Menu_DrawRow(&view,2,board,SUDOKU_INVALID);
-    assert(strstr(rows[2],"Conflicting"));
+    assert(strstr(rows[2],"题面冲突"));
+
+    /* Camera / Orange Pi status rows come from the vision protocol snapshot. */
+    memset(&view,0,sizeof view);
+    view.menu.depth = 0;
+    view.vision_enabled = 1;
+    view.camera_status = VISION_CAMERA_NO_FRAME;
+    view.pi_connected = 0;
+    Menu_DrawRow(&view,5,board,0);
+    assert(strstr(rows[5],"无画面"));
+    Menu_DrawRow(&view,6,board,0);
+    assert(strstr(rows[6],"未连接"));
+    view.camera_status = VISION_CAMERA_STREAMING;
+    view.pi_connected = 1;
+    Menu_DrawRow(&view,5,board,0);
+    assert(strstr(rows[5],"已连接"));
+    Menu_DrawRow(&view,6,board,0);
+    assert(strstr(rows[6],"已连接"));
+    view.vision_enabled = 0;
+    Menu_DrawRow(&view,5,board,0);
+    assert(strstr(rows[5],"已关闭"));
+    Menu_DrawRow(&view,6,board,0);
+    assert(strstr(rows[6],"已关闭"));
+
+    /* Out-of-range row/start/phase/save-status must clamp, never index out of bounds. */
+    Menu_DrawRow(&view,LCD_ROWS,board,0);
+    memset(&view,0,sizeof view);
+    view.menu.depth = 2;
+    view.menu.group = MENU_RACE;
+    view.menu.item[MENU_RACE] = 0;
+    view.start = (StartCondition)99;
+    Menu_DrawRow(&view,3,board,0);
+    assert(strstr(rows[3],"等待识别"));
+    view.menu.item[MENU_RACE] = 1;
+    view.lap = 1;
+    view.phase = 99;
+    Menu_DrawRow(&view,2,board,0);
+    assert(strstr(rows[2],"故障"));
+    view.menu.group = MENU_LEFT_PID;
+    view.menu.item[MENU_LEFT_PID] = 3;
+    view.menu.params_status = (CarParamsStatus)99;
+    Menu_DrawRow(&view,3,board,0);
+    assert(strstr(rows[3],"读写失败"));
     puts("PASS three-level menu, launch gates, PID transaction, cancellation and rendering");
     return 0;
 }

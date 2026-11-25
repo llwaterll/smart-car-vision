@@ -72,7 +72,8 @@ typedef struct {
     float offset, obstacle_m, goal_m; /* 绕障：横向偏移、障碍距离、剩余目标里程 */
     float last_gap, last_action;      /* 上次断路/绕障动作的里程，用于去重 */
     float straight_m;           /* 连续直线里程，用于确认断路入口 */
-    float last_curve;           /* 最后一次接受的曲率，1/m */
+    float last_curve;           /* 最后一次接受的曲率，1/m（允许单边估计） */
+    float last_measured_curve;  /* 最后一次实测曲率，1/m（不含单边估计） */
     uint32_t entered_ms, still_ms, last_road_ms; /* 赛段进入/静止/最近有效路况时间 */
     uint16_t last_sequence;     /* 视觉帧序号，用于识别“新帧” */
     uint8_t lap, clear_frames, held_element, have_sequence, timing_stop; /* 圈数/断路确认/元素去重/序号/停车计时 */

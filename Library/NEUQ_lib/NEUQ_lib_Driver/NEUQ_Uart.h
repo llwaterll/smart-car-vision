@@ -57,5 +57,6 @@ void NEUQ_Uart_Enable_RX_Interrupt(UART_DEV_ENUM dev, uint8_t priority);
 void NEUQ_Uart_write_byte(UART_DEV_ENUM DEV_select,uint8_t byte);
 void NEUQ_Uart_write_string(UART_DEV_ENUM DEV_select,uint8_t *str);
 void NEUQ_Uart_write_data(UART_DEV_ENUM DEV_select,uint8_t *pdata,uint32_t len);
+uint8_t NEUQ_Uart_Fault(UART_DEV_ENUM DEV_select);
 
-#endif 
+#endif

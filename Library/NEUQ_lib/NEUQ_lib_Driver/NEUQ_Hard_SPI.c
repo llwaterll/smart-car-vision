@@ -45,6 +45,49 @@ static SPI_HandleTypeDef *NEUQ_Hard_SPI_get_handle(Hard_SPI_DEV_ENUM DEV_select)
     }
 }
 
+/* 忙等上限：按 168 MHz、计数循环约 10 ms 估算。
+ * 外设时钟/状态异常时返回 0，避免主循环永久卡死。 */
+#define NEUQ_SPI_WAIT_LIMIT 200000U
+
+/* 每个 SPI 设备一个“总线故障”锁存：
+ * 任意一次等待超时就把该设备置为故障，后续访问立即返回，直到
+ * NEUQ_Hard_SPI_init() 重新初始化该设备。这样 LCD 失步后重初始化时，
+ * 里面“清 76800 个像素”的循环不会因为逐像素超时被拖成几十秒。 */
+static uint8_t s_spi_fault[3];
+static volatile uint32_t s_spi_timeouts;
+
+static uint8_t *NEUQ_Hard_SPI_fault_slot(Hard_SPI_DEV_ENUM DEV_select)
+{
+    unsigned i = (unsigned)DEV_select;
+    if (i >= 3U) {
+        i = 0U;
+    }
+    return &s_spi_fault[i];
+}
+
+/* wait_set=1：等到 mask 置位；wait_set=0：等到 mask 清零。
+ * 返回 1 表示等到，0 表示设备句柄无效、已锁存故障或超时。 */
+static uint8_t NEUQ_Hard_SPI_wait_flag(Hard_SPI_DEV_ENUM DEV_select, SPI_HandleTypeDef *h, uint32_t mask, uint8_t wait_set)
+{
+    uint8_t *fault = NEUQ_Hard_SPI_fault_slot(DEV_select);
+    uint32_t n = 0U;
+
+    if (h == NULL || h->Instance == NULL || *fault) {
+        return 0U;
+    }
+    for (;;) {
+        uint32_t sr = h->Instance->SR;
+        if (wait_set ? ((sr & mask) != 0U) : ((sr & mask) == 0U)) {
+            return 1U;
+        }
+        if (++n > NEUQ_SPI_WAIT_LIMIT) {
+            *fault = 1U;
+            s_spi_timeouts++;
+            return 0U;
+        }
+    }
+}
+
 //============================================================================
 // 函数功能：初始化硬件SPI
 // 入口参数：DEV_select:选择使用的SPI设备
@@ -100,6 +143,9 @@ void NEUQ_Hard_SPI_init(Hard_SPI_DEV_ENUM DEV_select,Hard_SPI_SCK_ENUM SCK_selec
         default:
             return;
     }
+
+    /* 重新初始化即视为总线恢复：清掉该设备之前的超时锁存。 */
+    *NEUQ_Hard_SPI_fault_slot(DEV_select) = 0U;
 
     Handle_use->Init.Mode=SPI_MODE_MASTER;                            //SPI：主机模式
     Handle_use->Init.Direction=(DEV_select==Hard_SPI_1) ? SPI_DIRECTION_2LINES : SPI_DIRECTION_1LINE;
@@ -161,11 +207,11 @@ void NEUQ_Hard_SPI_write_byte(Hard_SPI_DEV_ENUM DEV_select,GPIO_Ports_ENUM CS_se
     #else
 
     // printf("start write byte\n");
-    while (!(Handle_use->Instance->SR & SPI_SR_TXE));    // 等待发送缓冲区空
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_TXE, 1U)) return;  // 等待发送缓冲区空
     // printf("tx fifo empty\n");
     Handle_use->Instance->DR = byte;                     // 写入数据寄存器，开始发送
     // printf("byte written\n");
-    while (Handle_use->Instance->SR & SPI_SR_BSY);      // 等待发送完成
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U)) return; // 等待发送完成
     // printf("send complete\n");
 
     #endif
@@ -202,14 +248,14 @@ void NEUQ_Hard_SPI_write_2byte(Hard_SPI_DEV_ENUM DEV_select,GPIO_Ports_ENUM CS_s
 
     #else
 
-    while (!(Handle_use->Instance->SR & SPI_SR_TXE));    // 等待发送缓冲区空
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_TXE, 1U)) return;  // 等待发送缓冲区空
     Handle_use->Instance->DR = bytes;                     // 写入数据寄存器，开始发送
     if(DEV_select==Hard_SPI_1){
-        while (!(Handle_use->Instance->SR & SPI_SR_RXNE));
+        if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_RXNE, 1U)) return;
         dummy=Handle_use->Instance->DR;
         (void)dummy;
     }
-    while (Handle_use->Instance->SR & SPI_SR_BSY);      // 等待发送完成
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U)) return; // 等待发送完成
 
     #endif
 }
@@ -254,16 +300,16 @@ void NEUQ_Hard_SPI_write_8bit_data(Hard_SPI_DEV_ENUM DEV_select,GPIO_Ports_ENUM 
 
         #else
 
-        while (!(Handle_use->Instance->SR & SPI_SR_TXE));    // 等待发送缓冲区空
+        if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_TXE, 1U)) return;  // 等待发送缓冲区空
         Handle_use->Instance->DR = *(data+i);                     // 写入数据寄存器，开始发送
-        while (Handle_use->Instance->SR & SPI_SR_BSY);      // 等待发送完成
+        if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U)) return; // 等待发送完成
 
-        #endif        
+        #endif
     }
 
     #if HARD_SPI_USE_HAL
     NEUQ_GPIO_write(CS_select,GPIO_High);
-    #endif     
+    #endif
 
 }
 
@@ -304,14 +350,14 @@ void NEUQ_Hard_SPI_write_16bit_data(Hard_SPI_DEV_ENUM DEV_select,GPIO_Ports_ENUM
 
         #else
 
-        while (!(Handle_use->Instance->SR & SPI_SR_TXE));    // 等待发送缓冲区空
+        if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_TXE, 1U)) return;  // 等待发送缓冲区空
         Handle_use->Instance->DR = *(data+i);                     // 写入数据寄存器，开始发送
         if(DEV_select==Hard_SPI_1){
-            while (!(Handle_use->Instance->SR & SPI_SR_RXNE));
+            if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_RXNE, 1U)) return;
             dummy=Handle_use->Instance->DR;
             (void)dummy;
         }
-        while (Handle_use->Instance->SR & SPI_SR_BSY);      // 等待发送完成
+        if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U)) return; // 等待发送完成
 
         #endif        
     }
@@ -334,11 +380,11 @@ uint8_t NEUQ_Hard_SPI_transfer_byte(Hard_SPI_DEV_ENUM DEV_select,uint8_t tx_data
         return 0xFF;
     }
 
-    while (!(Handle_use->Instance->SR & SPI_SR_TXE));
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_TXE, 1U)) return 0xFF;
     *(__IO uint8_t *)&Handle_use->Instance->DR=tx_data;
-    while (!(Handle_use->Instance->SR & SPI_SR_RXNE));
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_RXNE, 1U)) return 0xFF;
     rx_data=*(__IO uint8_t *)&Handle_use->Instance->DR;
-    while (Handle_use->Instance->SR & SPI_SR_BSY);
+    if (!NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U)) return 0xFF;
     return rx_data;
 }
 
@@ -407,5 +453,21 @@ void NEUQ_Hard_SPI_wait_idle(Hard_SPI_DEV_ENUM DEV_select){
         return;
     }
 
-    while (Handle_use->Instance->SR & SPI_SR_BSY);      // 等待发送完成
+    (void)NEUQ_Hard_SPI_wait_flag(DEV_select, Handle_use, SPI_SR_BSY, 0U);  // 等待发送完成，超时返回
+}
+
+//============================================================================
+// 函数功能：查询某个 SPI 设备是否已锁存总线故障
+// 返回参数：1 故障（等待超时过），0 正常
+// 备注信息：NEUQ_Hard_SPI_init() 重新初始化该设备后自动清零。
+//============================================================================
+uint8_t NEUQ_Hard_SPI_Fault(Hard_SPI_DEV_ENUM DEV_select){
+    return *NEUQ_Hard_SPI_fault_slot(DEV_select);
+}
+
+//============================================================================
+// 函数功能：累计等待超时次数，供诊断/看门狗日志使用
+//============================================================================
+uint32_t NEUQ_Hard_SPI_TimeoutCount(void){
+    return s_spi_timeouts;
 }
