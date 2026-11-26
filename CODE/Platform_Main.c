@@ -61,6 +61,15 @@ static CarVision vision;
 static MenuState menu;
 static StartCondition menu_start;
 
+/* 发车连续帧确认：必须连续 3 个有效赛道帧才 READY。 */
+static MenuRoadConfirm launch_road;
+
+/* 蓝牙上位机链路：最近一次解析出完整命令帧的时间；仅用于设备状态显示。
+ * 与 Proto_Bluetooth 的运行看门狗（BT_LINK_TIMEOUT_MS=500 ms）相互独立：
+ * 这里只回答“上位机还连着吗”，不参与停车保护。 */
+static uint32_t bt_last_ms;
+#define BT_STATUS_TIMEOUT_MS 2500U
+
 /* 掉电参数：最近一次保存成功的内容，用于判断“RAM 与 Flash 是否一致”。 */
 static CarParams saved_params;
 static uint8_t params_saved;
@@ -277,6 +286,8 @@ static void poll_menu(void)
             view.params_dirty = !params_saved || !CarParams_Equal(&current, &saved_params);
         }
         view.start = menu_start;
+        view.launch_road_count = launch_road.count;
+        view.race_rpm = Menu_GetRaceRpm(&menu);
         view.state = car.state;
         view.motion = car.motion;
         view.fault = car.fault;
@@ -300,9 +311,13 @@ static void poll_menu(void)
         view.vision_bad = vision.bad_frames;
         view.vision_rejected = vision.rejected_frames;
         view.vision_enabled = (uint8_t)BOARD_VISION_ENABLE;
+        view.session_valid = vision.session_valid;
         view.camera_status = CarVision_GetCameraStatus(&vision, now);
+        /* 香橙派链路只看是否收到合法帧，与相机是否出图独立。 */
         view.pi_connected = (uint8_t)(!Uart_VisionFault() &&
-            (view.camera_status != VISION_CAMERA_UNKNOWN || view.fresh));
+            CarVision_LinkAlive(&vision, now));
+        view.bt_connected = (uint8_t)(bt_last_ms != 0U &&
+            (uint32_t)(now - bt_last_ms) <= BT_STATUS_TIMEOUT_MS);
         view.tile_mask = (result_status == SUDOKU_COLLECTING || result_status == SUDOKU_WAITING) ?
             copy_tiles(NULL, now) : finish_tile_mask;
         shown_result = result_status;
@@ -336,7 +351,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
     uint32_t now = HAL_GetTick();
     uint8_t fresh = CarVision_GetObservation(&vision, now, &o);
     uint8_t still = (fabsf(car.speed[0]) < 2 && fabsf(car.speed[1]) < 2);
-    uint8_t up;
+    uint8_t up, launch = 0;
 
     chassis_still = still && car.state == CAR_STOP;
     up = (NEUQ_GPIO_read(KEY_UP_PIN) == GPIO_Low) ? 1U : 0U;
@@ -353,6 +368,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
     if (up && (car.state != CAR_STOP || stop_release_ms))
     {
         Car_LocalStop(&car);
+        Menu_Disarm(&menu);
         stop_release_ms = KEY_DEBOUNCE_COUNT * KEY_SCAN_PERIOD_MS;
     }
     else if (stop_release_ms)
@@ -364,6 +380,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
     if (finish_pending)
     {
         Car_LocalStop(&car);
+        Menu_Disarm(&menu);
     }
 
     /* 停车且收尾完成后结束本轮视觉会话：发送端不必重启，下一次 HELLO
@@ -376,9 +393,11 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
             fresh = 0;
         }
         race_session = 0U;
+        Menu_Disarm(&menu);
+        memset(&launch_road, 0, sizeof launch_road);
     }
 
-    menu_start = Menu_StartCondition(&car, still, finish_pending,
+    menu_start = Menu_StartCondition(&launch_road, &car, still, finish_pending,
                                      (fresh && !Uart_VisionFault()) ? &o : NULL,
                                      race_session);
 
@@ -402,14 +421,24 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
             Car_LocalStop(&car);
             break;
         }
-        if (action == MENU_LAUNCH && Car_StartRace(&car))
+        if (action == MENU_LAUNCH)
         {
-            Track_Start(&track);
-            display_session = o.session;
-            race_session = o.session;
-            result_status = SUDOKU_COLLECTING;
-            menu_start = START_STOP_FIRST;
+            launch = 1;
         }
+    }
+
+    /* 预备发车：视觉就绪后自动触发，和按 OK 走同一条发车通路。 */
+    if (Menu_PollArmed(&menu, menu_start) == MENU_LAUNCH)
+    {
+        launch = 1;
+    }
+    if (launch && Car_StartRace(&car))
+    {
+        Track_StartWithRpm(&track, (float)Menu_GetRaceRpm(&menu));
+        display_session = o.session;
+        race_session = o.session;
+        result_status = SUDOKU_COLLECTING;
+        menu_start = START_STOP_FIRST;
     }
 
     if (car.motion == CAR_MOTION_RACE)
@@ -624,11 +653,16 @@ void Car_PIT_Handler(void)
     }
     else
     {
+        uint32_t now = HAL_GetTick();
+        uint32_t frames = car.frames;
+
         /* 每拍最多处理 32 字节，限制串口解析占用的中断时间。 */
         for (n = 0; n < 32U && Uart_TakeBt(&byte); n++)
         {
             Car_FeedByte(&car, byte);
         }
+        /* 解析出完整命令帧才认为上位机在线；纯串口噪声不刷新。 */
+        if (car.frames != frames) bt_last_ms = now;
     }
 
     /* 用实测周期更新控制器，并把双轮输出应用到电机。 */
@@ -653,9 +687,21 @@ void Car_PIT_Handler(void)
 
         for (n = 0; n < 64U && Uart_TakeVision(&byte); n++)
         {
+            uint32_t accepted = vision.accepted_frames;
+            CarVisionObservation road;
+            uint8_t road_fresh;
+
             /* 只有停车状态才允许接受新的 HELLO 会话。 */
             CarVision_Feed(&vision, byte, now,
                            (car.state == CAR_STOP && !finish_pending) ? 1U : 0U);
+            if (vision.accepted_frames == accepted) continue;
+
+            /* 每接受一帧就推进一次发车确认，避免一拍拍内多帧被漏计。 */
+            road_fresh = CarVision_GetObservation(&vision, now, &road);
+            menu_start = Menu_StartCondition(&launch_road, &car, chassis_still,
+                                             finish_pending,
+                                             (road_fresh && !Uart_VisionFault()) ? &road : NULL,
+                                             race_session);
         }
     }
 

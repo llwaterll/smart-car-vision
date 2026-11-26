@@ -55,10 +55,48 @@ static void test_hello_recovery(void)
     assert(observation.session == session && observation.sequence == 45);
 }
 
+static void test_link_alive(void)
+{
+    const uint8_t data[16] = {0};
+    const uint8_t camera[1] = {1};
+    uint8_t hello[VIS_MAX_FRAME], status[VIS_MAX_FRAME], track[VIS_MAX_FRAME];
+    CarVision v;
+    unsigned n;
+
+    CarVision_Init(&v);
+    assert(!CarVision_LinkAlive(&v, 0U));
+
+    /* HELLO 也是合法帧：即使还没收到状态/道路帧，也能证明香橙派在线。 */
+    n = make_frame(hello,0,0,42,0,NULL,0);
+    feed(&v,hello,n,100U,1);
+    assert(CarVision_LinkAlive(&v,100U));
+    assert(CarVision_LinkAlive(&v,100U+VIS_LINK_TIMEOUT_MS));
+    assert(!CarVision_LinkAlive(&v,101U+VIS_LINK_TIMEOUT_MS));
+
+    /* 状态帧不要求比赛会话，同样刷新链路时间戳。 */
+    n = make_frame(status,3,0,42,0,camera,1);
+    feed(&v,status,n,3000U,0);
+    assert(CarVision_LinkAlive(&v,3000U));
+    assert(!CarVision_LinkAlive(&v,3001U+VIS_LINK_TIMEOUT_MS));
+
+    /* 会话不符被业务层拒绝，但 CRC 正确仍证明链路在线。 */
+    n = make_frame(track,1,9,43,0,data,16);
+    feed(&v,track,n,5000U,0);
+    assert(CarVision_LinkAlive(&v,5000U));
+
+    /* 串口接收异常后立即判离线；下一帧合法数据恢复。 */
+    CarVision_Invalidate(&v);
+    assert(!CarVision_LinkAlive(&v,5000U));
+    n = make_frame(status,3,0,42,0,camera,1);
+    feed(&v,status,n,5100U,0);
+    assert(CarVision_LinkAlive(&v,5100U));
+}
+
 int main(void)
 {
     CarVision v; CarVisionObservation o; CarVisionTile tile;
     test_hello_recovery();
+    test_link_alive();
     uint8_t f[64],data[16]={0,15,3,132,0,50,0,100,0,20,6,255,0,80,0,0};
     unsigned n; uint16_t crc=0xffff; const uint8_t *s=(const uint8_t *)"123456789";
     while(*s)crc=CarVision_Crc16(crc,*s++);

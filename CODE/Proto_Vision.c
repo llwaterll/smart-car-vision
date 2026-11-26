@@ -158,6 +158,7 @@ void CarVision_Invalidate(CarVision *v)
     v->used = 0;                  /* 清空未消费字节 */
     v->have_observation = 0;      /* 道路观测失效 */
     v->camera_status = VISION_CAMERA_UNKNOWN; /* 串口异常后不再相信旧状态 */
+    v->link_seen = 0;             /* 串口异常后不再认为香橙派链路在线 */
     /* Collected tiles are persistent evidence for this session. Only a new
      * HELLO clears them; a later UART fault must not erase an earlier tile. */
 }
@@ -193,6 +194,24 @@ CarVisionCameraStatus CarVision_GetCameraStatus(const CarVision *v, uint32_t now
 {
     return (uint32_t)(now_ms - v->camera_status_ms) <= VIS_STATUS_TIMEOUT_MS ?
            v->camera_status : VISION_CAMERA_UNKNOWN;
+}
+
+/*
+ * 函数名称：CarVision_LinkAlive
+ * 函数功能：判断香橙派链路是否在线。
+ * 参数说明：v      —— 视觉解析器对象；
+ *           now_ms —— 当前毫秒时间。
+ * 返回参数：1 表示超时时间内收到过任意 CRC 正确的帧；0 表示无数据或已超时。
+ * 备注信息：只认 CRC 已经通过的帧，因此能排除纯串口噪声；业务字段被拒
+ *           （旧会话/旧序号等）也算链路在线，便于和“协议不匹配”区分。
+ */
+uint8_t CarVision_LinkAlive(const CarVision *v, uint32_t now_ms)
+{
+    if (v == NULL || !v->link_seen)
+    {
+        return 0;
+    }
+    return (uint32_t)(now_ms - v->link_frame_ms) <= VIS_LINK_TIMEOUT_MS;
 }
 
 /*
@@ -243,7 +262,18 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
     uint16_t age = u16(f + 12);                     /* 发送端处理年龄 */
     uint16_t delta;                                 /* 与上一序号的差值，用于回绕比较 */
     uint32_t session = u32(f + 8);                  /* 会话编号 */
+    uint8_t link_down;                              /* 本帧之前链路是否已超时 */
     unsigned i;                                     /* 数独子块循环下标 */
+
+    /* 先记录“本帧到达前”的链路状态，再刷新时间戳：同一会话的周期 HELLO
+     * 平时忽略，只有链路刚恢复时才当作重连。 */
+    link_down = (uint8_t)(!v->link_seen ||
+        (uint32_t)(now - v->link_frame_ms) > VIS_LINK_TIMEOUT_MS);
+
+    /* CRC 已通过：无论业务字段是否合法，都说明香橙派和串口在工作。
+     * 放在版本/会话校验之前，旧会话、旧序号等被拒帧也能维持链路在线。 */
+    v->link_frame_ms = now;
+    v->link_seen = 1;
 
     /* 版本必须为 1，会话编号不能为 0。 */
     if (f[2] != 1 || session == 0)
@@ -254,9 +284,16 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
 
     if (type == 0 && len == 0 && age == 0)
     {
-        /* 周期重发的同会话 HELLO 不刷新观测、不推进序号，也不改计数。 */
+        /* 周期重发的同会话 HELLO 正常忽略；只有链路刚恢复且允许 HELLO 时，
+         * 才清掉旧观测并重置序号水位，避免调试暂停后一直拒绝旧序号。 */
         if (v->session_valid && v->session == session)
         {
+            if (allow_hello && link_down)
+            {
+                v->have_observation = 0;
+                v->have_sequence = 0;
+                v->accepted_frames++;
+            }
             return;
         }
 

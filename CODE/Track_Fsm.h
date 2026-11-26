@@ -11,9 +11,9 @@
  *   输出：左右轮目标转速（rpm），交给 Task_Fsm 的 Car_RaceWheels()。
  *
  *   运行视角
- *     菜单按 OK 发车 -> Track_Start() 清零里程与航向 -> 每 5 ms Track_Step()
- *     -> 跑满 TRACK_FINISH_M 后进入 TRACK_SEGMENT_FINISHED，任务层停车并
- *     调用数独求解。
+ *     菜单按 OK 发车 -> Track_StartWithRpm() 清零里程/航向并写入菜单转速
+ *     -> 每 5 ms Track_Step() -> 跑满 TRACK_FINISH_M 后进入
+ *     TRACK_SEGMENT_FINISHED，任务层停车并调用数独求解。
  * ============================================================================
  */
 
@@ -36,6 +36,22 @@
 #define TRACK_FINISH_M           (2.0f * TRACK_LAP_M) /* 终点里程：两圈 */
 #define TRACK_BYPASS_SIDE        1.0f     /* 绕障方向：+1 左、-1 右 */
 #define TRACK_BYPASS_OFFSET_M    0.18f    /* 绕障横向偏移，米 */
+#define TRACK_YELLOW_CONFIRM_FRAMES 3U    /* 黄灯连续确认帧数，防单帧误检 */
+
+/* ---------------------------------------------------------------------------
+ * 比赛转速（与原作者菜单保持一致）
+ * 功能：把“菜单里设定的巡航转速”换算成底盘线速度，并作为速度规划上限。
+ * 取值：默认 300 rpm（约 1.02 m/s）；范围 20..900 rpm；单按 ±5、长按 ±20。
+ * 注意：Track_Start() 内部仍按 0.55 m/s 初始化，便于单元测试复现旧行为；
+ *       比赛发车走 Track_StartWithRpm()，使用菜单设定值。
+ * ------------------------------------------------------------------------- */
+#define TRACK_DEFAULT_RPM        300U     /* 默认巡航转速，rpm */
+#define TRACK_MIN_RPM            20U      /* 菜单可设最低转速，rpm */
+#define TRACK_MAX_RPM            900U     /* 菜单可设最高转速，rpm（与 90% 限幅一致） */
+#define TRACK_RPM_STEP_FINE      5U       /* 单按 UP/DOWN 的步进，rpm */
+#define TRACK_RPM_STEP_COARSE    20U      /* 长按连发的步进，rpm */
+#define TRACK_RPM_TO_MPS(rpm)    ((float)(rpm) * (6.2831853f * TRACK_RADIUS_M / 60.0f))
+#define TRACK_MPS_TO_RPM(mps)    ((float)(mps) * (60.0f / (6.2831853f * TRACK_RADIUS_M)))
 
 /* ---------------------------------------------------------------------------
  * 视觉丢失策略
@@ -74,9 +90,12 @@ typedef struct {
     float straight_m;           /* 连续直线里程，用于确认断路入口 */
     float last_curve;           /* 最后一次接受的曲率，1/m（允许单边估计） */
     float last_measured_curve;  /* 最后一次实测曲率，1/m（不含单边估计） */
+    float target_rpm;           /* 菜单设定的巡航转速，rpm；<=0 时回退到 0.55 m/s */
     uint32_t entered_ms, still_ms, last_road_ms; /* 赛段进入/静止/最近有效路况时间 */
+    uint32_t last_yellow_ms;    /* 最近一次黄灯确认帧的时间，毫秒 */
     uint16_t last_sequence;     /* 视觉帧序号，用于识别“新帧” */
     uint8_t lap, clear_frames, held_element, have_sequence, timing_stop; /* 圈数/断路确认/元素去重/序号/停车计时 */
+    uint8_t yellow_frames;      /* 连续黄灯确认帧数，达到阈值才进绕障 */
     uint8_t degraded, have_curve; /* 丢线降速标志 / 是否已有曲率 */
 } TrackState;
 
@@ -88,8 +107,27 @@ typedef struct { float rpm[2]; } TrackDrive;
  * 函数功能：发车时清空巡线状态：里程、航向、赛段和视觉保持全部复位。
  * 参数说明：r —— 巡线状态对象。
  * 返回参数：无。
+ * 备注信息：默认巡航速度按 0.55 m/s 初始化，与改动前的速度规划一致；
+ *           比赛发车使用 Track_StartWithRpm() 覆盖为菜单设定值。
  */
 void Track_Start(TrackState *r);
+
+/*
+ * 函数名称：Track_StartWithRpm
+ * 函数功能：按菜单设定转速发车。
+ * 参数说明：r          —— 巡线状态对象；
+ *           target_rpm —— 巡航转速，超出 TRACK_MIN_RPM..TRACK_MAX_RPM 会被夹住。
+ * 返回参数：无。
+ */
+void Track_StartWithRpm(TrackState *r, float target_rpm);
+
+/*
+ * 函数名称：Track_ClampRpm
+ * 函数功能：把转速限制到比赛允许范围，并把剩余 90% 限幅交给 drive()。
+ * 参数说明：target_rpm —— 待限制的转速，允许 NaN（回退到默认值）。
+ * 返回参数：夹紧后的转速，单位 rpm。
+ */
+float Track_ClampRpm(float target_rpm);
 
 /*
  * 函数名称：Track_Step

@@ -82,6 +82,44 @@ static void estimated_curvature_hold(void) {
     }
 }
 
+/* 黄灯必须连续 3 个新帧确认才进绕障；中间任一帧不满足立即清零。 */
+static void yellow_confirmation(void) {
+    TrackState r;
+    CarVisionObservation o = {0};
+    TrackDrive cmd;
+    Track_Start(&r);
+    o.valid_mask = VISION_CURVATURE_VALID | VISION_DISTANCE_VALID;
+    o.confidence = 0.9f;
+    o.element = VISION_ELEMENT_YELLOW;
+    o.distance_m = 0.50f;
+    o.sequence = 1;
+    o.received_ms = 100;
+
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,100);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.yellow_frames == 1);
+    assert(cmd.rpm[0] > 0.0f && cmd.rpm[1] > 0.0f);
+    ++o.sequence; o.received_ms = 140;
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,140);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.yellow_frames == 2);
+
+    /* 单帧元素异常：计数清零，重新开始。 */
+    o.element = VISION_ELEMENT_NONE;
+    ++o.sequence; o.received_ms = 180;
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,180);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.yellow_frames == 0);
+
+    o.element = VISION_ELEMENT_YELLOW;
+    ++o.sequence; o.received_ms = 220;
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,220);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.yellow_frames == 1);
+    ++o.sequence; o.received_ms = 260;
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,260);
+    assert(r.phase == TRACK_SEGMENT_TRACK && r.yellow_frames == 2);
+    ++o.sequence; o.received_ms = 300;
+    cmd = Track_Step(&r,&o,0,0,0.005f,0,0,1,300);
+    assert(r.phase == TRACK_SEGMENT_BYPASS);
+}
+
 int main(void) {
     TrackState r;
     TrackDrive cmd;
@@ -98,6 +136,7 @@ int main(void) {
     memset(tiles,0,sizeof(tiles));
     assert(!Sudoku_Solve(tiles,answer));
     estimated_curvature_hold();
+    yellow_confirmation();
     Track_Start(&r);
     o.valid_mask=VISION_CURVATURE_VALID; o.curvature_inv_m=3; o.confidence=1;
     cmd=Track_Step(&r,&o,0,0,0.005f,0,0,1,0);

@@ -9,7 +9,7 @@
  *
  *   外设资源
  *     USART1（PA9/PA10）-> 蓝牙 JDY-31：命令下行 + VOFA+ 遥测上行
- *     USART3（PB10/PB11）-> 香橙派视觉：只下行（STM32 侧只收不发）
+ *     UART4（PC10/PC11）-> 香橙派视觉：只下行（STM32 侧只收不发）
  *
  *   运行视角
  *     RX 中断 -> Car_UART_RX_Handler / Car_Vision_UART_RX_Handler 只写 FIFO；

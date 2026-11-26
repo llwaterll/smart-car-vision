@@ -50,6 +50,6 @@ int main(void)
     TS_UART_3_RX_CALLBACK(0xd4);
     assert(bt_count == 1u && bt_byte == 0xa1);
     assert(vision_count == BOARD_VISION_ENABLE);
-    assert(!vision_count || vision_byte == 0xc3);
+    assert(!vision_count || vision_byte == 0xd4);
     return 0;
 }

@@ -48,7 +48,7 @@
  *
  * 串口编号由 Board_Config.h 的 BOARD_UART_BT_INDEX / BOARD_UART_VIS_INDEX 决定：
  *   - 蓝牙使用 USART1（NEUQ 库索引 0）；
- *   - 视觉使用 USART3（NEUQ 库索引 2）；
+ *   - 视觉使用 UART4（NEUQ 库索引 3，PC10/PC11）；
  *   - 其余串口接收回调留空，避免未配置的串口误入控制逻辑。
  *
  * 函数列表
@@ -122,16 +122,16 @@ void TS_UART_1_RX_CALLBACK(uint8_t dat)
 
 void TS_UART_2_RX_CALLBACK(uint8_t dat)
 {
+    (void)dat;
+}
+
+void TS_UART_3_RX_CALLBACK(uint8_t dat)
+{
 #if BOARD_VISION_ENABLE
     Car_Vision_UART_RX_Handler(dat);
 #else
     (void)dat;
 #endif
-}
-
-void TS_UART_3_RX_CALLBACK(uint8_t dat)
-{
-    (void)dat;
 }
 
 /* ========================================================================== */

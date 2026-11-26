@@ -15,7 +15,7 @@
  *     主循环里连续画完。
  *
  *   菜单结构（与实车一致）
- *     Race        ：Start race / Race status / Sudoku result
+ *     Race        ：Start race / Race status / Sudoku result / Race RPM
  *     Sensors     ：Wheel speeds / IMU / Vision
  *     Left wheel inner PID  ：Kp / Ki / Kd / Save parameters
  *     Right wheel inner PID ：同上
@@ -47,15 +47,25 @@ typedef enum { MENU_RACE, MENU_SENSORS, MENU_LEFT_PID, MENU_RIGHT_PID, MENU_GROU
 
 /* 发车条件：只有 START_READY 才允许 OK 发车；START_COUNT 只用于边界检查。 */
 typedef enum { START_READY, START_STOP_FIRST, START_MOVING, START_RESULT,
-               START_NO_ROAD, START_NEW_SESSION, START_COUNT } StartCondition;
+               START_NO_VISION, START_NO_ROAD, START_NEW_SESSION, START_COUNT } StartCondition;
 
 /* 菜单动作：返回给平台层执行。 */
 typedef enum { MENU_IDLE, MENU_LAUNCH, MENU_SAVE_PARAMS } MenuAction;
 
+/* 发车确认：连续收到 3 个同一会话、序号递增、未过期的有效赛道帧才 READY。 */
+typedef struct {
+    uint32_t session;      /* 确认中的视觉会话号 */
+    uint32_t received_ms;  /* 上一确认帧的本机接收时间 */
+    uint16_t sequence;     /* 上一确认帧序号 */
+    uint8_t count;         /* 已连续确认的帧数 */
+} MenuRoadConfirm;
+
 typedef struct {
     uint8_t depth, group, item[MENU_GROUPS], feedback; /* 光标层级/组/项/反馈 */
     uint8_t node;                                      /* 当前链表节点（组节点或项节点） */
-    unsigned candidate;                                /* 正在编辑的增益，放大 100 倍 */
+    uint8_t race_armed;                                /* 1=已预备，视觉就绪后自动发车 */
+    unsigned candidate;                                /* 正在编辑的增益(×100)或转速 */
+    uint16_t race_rpm;                                 /* 菜单设定的比赛转速，rpm */
     CarParamsStatus params_status;                     /* 最近一次保存结果 */
 } MenuState;
 
@@ -67,9 +77,12 @@ typedef struct {
     uint8_t imu_present, gyro_ok, samples;                     /* 陀螺状态 */
     uint8_t tile_mask;                                         /* 已收到的数独子块位图 */
     uint8_t params_dirty, params_saved;                        /* 参数是否与 Flash 一致 */
+    uint8_t launch_road_count;                                 /* 发车已连续确认的有效赛道帧数 */
     uint32_t vision_ok, vision_bad, vision_rejected;           /* 视觉接收统计 */
     CarVisionCameraStatus camera_status;                       /* 摄像头状态（香橙派 TYPE=3） */
-    uint8_t pi_connected, vision_enabled;                      /* 香橙派链路 / 视觉功能是否启用 */
+    uint8_t pi_connected, vision_enabled, bt_connected;        /* 香橙派/视觉启用/蓝牙上位机 */
+    uint8_t session_valid;                                     /* 是否已绑定视觉会话 */
+    uint16_t race_rpm;                                         /* 当前比赛转速，rpm */
     float distance, yaw_deg, gyro_dps, bias_dps;
     float speed[2], reference[2], pwm[2], gains[3];
     CarVisionObservation obs;
@@ -88,12 +101,34 @@ void Menu_Init(MenuState *m);
 /*
  * 函数名称：Menu_StartCondition
  * 函数功能：综合整车状态、轮速、数独收尾、视觉路况与会话号，给出能否发车。
- * 参数说明：car —— 控制对象；still —— 轮速是否近似为零；
- *           pending —— 是否正在准备数独结果；road —— 最新道路观测；
+ * 参数说明：confirm          —— 连续有效帧确认状态；首次传全 0；
+ *           car              —— 控制对象；still —— 轮速是否近似为零；
+ *           pending          —— 是否正在准备数独结果；road —— 最新道路观测；
  *           previous_session —— 上一场比赛的视觉会话号。
- * 返回参数：发车条件枚举。
+ * 返回参数：发车条件枚举；只有 START_READY 才允许发车。
+ * 备注信息：要求连续 3 个同一会话、序号递增、未过期的有效赛道帧，
+ *           避免单帧误检就发车；条件中断会清零确认计数。
  */
-StartCondition Menu_StartCondition(const Car_Core *car, uint8_t still, uint8_t pending, const CarVisionObservation *road, uint32_t previous_session);
+StartCondition Menu_StartCondition(MenuRoadConfirm *confirm, const Car_Core *car, uint8_t still, uint8_t pending, const CarVisionObservation *road, uint32_t previous_session);
+
+/*
+ * 函数名称：Menu_GetRaceRpm / Menu_Disarm
+ * 函数功能：读取比赛转速（0 时回退默认值）/ 取消“预备自动发车”。
+ * 参数说明：m —— 菜单状态；可为 NULL。
+ * 返回参数：Menu_GetRaceRpm 返回夹紧后的转速，rpm。
+ */
+uint16_t Menu_GetRaceRpm(const MenuState *m);
+void Menu_Disarm(MenuState *m);
+
+/*
+ * 函数名称：Menu_PollArmed
+ * 函数功能：检查“预备发车”状态；视觉就绪时返回 MENU_LAUNCH。
+ * 参数说明：m     —— 菜单状态；
+ *           start —— 当前发车条件。
+ * 返回参数：MENU_IDLE / MENU_LAUNCH。
+ * 备注信息：车动、故障、离开发车页或正在收尾时会自动取消预备。
+ */
+MenuAction Menu_PollArmed(MenuState *m, StartCondition start);
 
 /*
  * 函数名称：Menu_Key

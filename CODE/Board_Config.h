@@ -42,20 +42,21 @@
 
 /* ---------------------------------------------------------------------------
  * 串口通道分配
- *   外设：USART1（蓝牙 JDY-31，PA9 TX / PA10 RX）、USART3（视觉，PB10/PB11）
+ *   外设：USART1（蓝牙 JDY-31，PA9 TX / PA10 RX）、UART4（视觉，PC10 TX / PC11 RX）
  *   功能：把“哪个串口干什么”固定在板级，避免上层各模块各写一份
- *   取值：蓝牙必须 0 号、视觉必须 2 号。下面用 #error 锁死：一旦误改，
- *         程序会把蓝牙帧当视觉帧解析，立刻死机式丢帧，必须编译期拦住。
+ *   取值：蓝牙必须 0 号、视觉必须 3 号（NEUQ 库把 UART4 编为 UART_3）。
+ *         下面用 #error 锁死：一旦误改，程序会把蓝牙帧当视觉帧解析，
+ *         立刻死机式丢帧，必须编译期拦住。
  * ------------------------------------------------------------------------- */
 #define BOARD_UART_BT_INDEX      0        /* 蓝牙串口在 NEUQ 库中的设备号 */
 #define BOARD_UART_BT_BAUD       UART_BAUD_9600     /* 蓝牙波特率：JDY-31 默认 9600 */
-#define BOARD_UART_VIS_INDEX     2        /* 视觉串口在 NEUQ 库中的设备号 */
+#define BOARD_UART_VIS_INDEX     3        /* 视觉串口在 NEUQ 库中的设备号（UART4） */
 #define BOARD_UART_VIS_BAUD      UART_BAUD_115200   /* 视觉波特率：与香橙派约定 115200 */
 #ifndef BOARD_VISION_ENABLE
 #define BOARD_VISION_ENABLE      1        /* 1=启用视觉串口；0=完全不初始化，用于纯蓝牙调试 */
 #endif
-#if BOARD_UART_BT_INDEX != 0 || BOARD_UART_VIS_INDEX != 2
-#error This board requires UART_0 for Bluetooth and UART_2 for vision
+#if BOARD_UART_BT_INDEX != 0 || BOARD_UART_VIS_INDEX != 3
+#error This board requires UART_0 for Bluetooth and UART_3 for vision
 #endif
 #if BOARD_VISION_ENABLE != 0 && BOARD_VISION_ENABLE != 1
 #error BOARD_VISION_ENABLE must be 0 or 1

@@ -36,8 +36,8 @@
 extern UART_HandleTypeDef UART_0_handle;
 extern uint8_t UART_0_RX_dat;
 #if BOARD_VISION_ENABLE
-extern UART_HandleTypeDef UART_2_handle;
-extern uint8_t UART_2_RX_dat;
+extern UART_HandleTypeDef UART_3_handle;
+extern uint8_t UART_3_RX_dat;
 #endif
 
 /* 蓝牙接收 FIFO 及其缓冲区：中断写入，控制中断读取。 */
@@ -93,7 +93,7 @@ void Uart_Reset(void)
     Uart_Init();
     __HAL_UART_CLEAR_OREFLAG(&UART_0_handle);
 #if BOARD_VISION_ENABLE
-    __HAL_UART_CLEAR_OREFLAG(&UART_2_handle);
+    __HAL_UART_CLEAR_OREFLAG(&UART_3_handle);
 #endif
 }
 
@@ -247,10 +247,10 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(&UART_0_handle, &UART_0_RX_dat, 1);
     }
 #if BOARD_VISION_ENABLE
-    else if (huart == &UART_2_handle)
+    else if (huart == &UART_3_handle)
     {
         s_vis_fault = 1;
-        HAL_UART_Receive_IT(&UART_2_handle, &UART_2_RX_dat, 1);
+        HAL_UART_Receive_IT(&UART_3_handle, &UART_3_RX_dat, 1);
     }
 #endif
 }

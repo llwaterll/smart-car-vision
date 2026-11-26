@@ -18,7 +18,7 @@
  *     视觉快照 o（可为 NULL）+ 左/右轮本拍米数 dl/dr + 实测周期 dt
  *       -> 里程 ds、航向 dyaw（轮速差与陀螺按 15%/85% 融合）
  *       -> 赛段判定（TRACK/GAP/BYPASS/RED/FINISHED/FAULT）
- *       -> 速度规划（曲率越大越慢；丢线降到 TRACK_HOLD_SPEED_MPS）
+ *       -> 速度规划（菜单转速作上限；曲率越大越慢；丢线降到 TRACK_HOLD_SPEED_MPS）
  *       -> drive(v, omega)：自行车模型算左右轮 rpm，并限制内轮不反转
  *
  * 参数传递约定（重要）
@@ -31,7 +31,9 @@
  *
  * 函数列表
  *   static float      limit(float x, float bound)
+ *   float             Track_ClampRpm(float target_rpm)
  *   void              Track_Start(TrackState *r)
+ *   void              Track_StartWithRpm(TrackState *r, float target_rpm)
  *   static TrackDrive drive(float v, float omega)
  *   static void       enter(TrackState *r, TrackPhase phase, uint32_t now)
  *   TrackDrive        Track_Step(...)
@@ -67,7 +69,38 @@ static float limit(float x, float bound) {
 void Track_Start(TrackState *r) {
     memset(r, 0, sizeof(*r));
     r->lap = 1;
+    r->target_rpm = TRACK_MPS_TO_RPM(0.55f);   /* 改动前的默认巡航速度 */
     r->last_gap = r->last_action = -100.0f;
+}
+
+/*
+ * 函数名称：Track_ClampRpm
+ * 函数功能：把菜单设定转速夹到比赛允许范围。
+ * 参数说明：target_rpm —— 待限制的转速；NaN/Inf 回退到默认值。
+ * 返回参数：夹紧后的转速，rpm。
+ * 备注信息：上限同时受 TRACK_MAX_RPM 和板级 90% 转速限幅约束，
+ *           保证“菜单允许给的目标”不会高于保护判据。
+ */
+float Track_ClampRpm(float target_rpm) {
+    float hi = fminf((float)TRACK_MAX_RPM, BOARD_RPM_LIMIT);
+
+    if (!isfinite(target_rpm)) return (float)TRACK_DEFAULT_RPM;
+    if (target_rpm < (float)TRACK_MIN_RPM) return (float)TRACK_MIN_RPM;
+    if (target_rpm > hi) return hi;
+    return target_rpm;
+}
+
+/*
+ * 函数名称：Track_StartWithRpm
+ * 函数功能：按菜单设定转速发车。
+ * 参数说明：r          —— 巡线状态对象；
+ *           target_rpm —— 巡航转速，超出范围会被夹住。
+ * 返回参数：无。
+ * 备注信息：比赛发车统一走这里；Track_Start() 只保留旧默认值给单元测试。
+ */
+void Track_StartWithRpm(TrackState *r, float target_rpm) {
+    Track_Start(r);
+    r->target_rpm = Track_ClampRpm(target_rpm);
 }
 
 /*
@@ -145,7 +178,9 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     float ds = 0.5f * (dl + dr);               /* 本拍底盘前进距离：两轮平均，米 */
     float dyaw = (dr - dl) / TRACK_WIDTH_M;    /* 轮速差推算的本拍航向变化，rad */
     float s, curve, speed, heading, target, error, along; /* 赛段内里程/曲率/速度/航向/目标偏移/误差 */
+    float v_target, lap_v, a_lat;              /* 菜单巡航速度/本圈上限/横向加速度上限 */
     int road, measured_road, new_frame, in_window; /* 看到路/实测路/新帧/断路窗口 */
+    int action_ready, yellow;                  /* 元素动作条件/黄灯候选 */
 
     /* 完赛或已判故障后不再推进，重复调用保持停车输出。 */
     if (r->phase == TRACK_SEGMENT_FINISHED || r->phase == TRACK_SEGMENT_FAULT) return stop;
@@ -205,6 +240,25 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
         /* 断路入口窗口：TRACK_GAP_ENTRY_M=0 表示完全由视觉判定，不限位置。 */
         in_window = TRACK_GAP_ENTRY_M <= 0 || fabsf(along - TRACK_GAP_ENTRY_M) < 1.0f;
 
+        /* 元素动作条件：必须是实测路 + 有距离 + 置信度足够 + 不是刚处理过的元素。
+         * 单边估计曲率可以转向，但不能触发绕障/红灯这类实体动作。 */
+        action_ready = measured_road && (o->valid_mask & VISION_DISTANCE_VALID) &&
+                       o->element != r->held_element && o->confidence >= 0.50f;
+        yellow = action_ready && o->element == VISION_ELEMENT_YELLOW &&
+                 o->distance_m <= 0.80f;
+
+        /* 黄灯连续确认：只有新帧才累加；条件中断、或两帧间隔超过视觉时效，
+         * 立即清零。单帧误检不会让车提前切进绕障。 */
+        if (!yellow) {
+            r->yellow_frames = 0;
+        } else if (new_frame) {
+            if ((uint32_t)(now - r->last_yellow_ms) > VIS_MAX_AGE_MS) {
+                r->yellow_frames = 0;
+            }
+            r->last_yellow_ms = now;
+            if (r->yellow_frames < 0xFFU) r->yellow_frames++;
+        }
+
         if (!road) {
             /* 看不到路时才可能是断路：要求视觉给出 GAP 元素、位置窗口正确、
              * 距上次断路超过 0.75 圈、且最近确有直线（≥0.10 m），
@@ -215,11 +269,10 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
                 enter(r, TRACK_SEGMENT_GAP, now);
                 r->last_gap = r->distance;
             }
-        } else if (measured_road && (o->valid_mask & VISION_DISTANCE_VALID) &&
-                   o->element != r->held_element && o->confidence >= 0.50f) {
-            /* 绕障：黄灯且距离 ≤0.80 m。obstacle_m 取测量值（最小 0.08 m），
-             * goal_m 是“越过障碍再走 0.42 m”的总目标里程。 */
-            if (o->element == VISION_ELEMENT_YELLOW && o->distance_m <= 0.80f) {
+        } else if (action_ready) {
+            /* 绕障：黄灯连续 3 帧确认且距离 ≤0.80 m。obstacle_m 取测量值
+             * （最小 0.08 m），goal_m 是“越过障碍再走 0.42 m”的总目标里程。 */
+            if (yellow && r->yellow_frames >= TRACK_YELLOW_CONFIRM_FRAMES) {
                 enter(r, TRACK_SEGMENT_BYPASS, now);
                 r->obstacle_m = fmaxf(0.08f, o->distance_m);
                 r->goal_m = r->obstacle_m + 0.42f;
@@ -318,9 +371,16 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
      * |曲率| < 1.75 /m 认为在直道，一进弯立刻清零。 */
     r->straight_m = fabsf(r->last_measured_curve) < 1.75f ? r->straight_m + fmaxf(0,ds) : 0;
 
-    /* 速度规划：v ≤ min(圈速上限, √(0.55/|k|))，即把横向加速度 a=v²|k| 限制在 0.55。
-     * 第一圈上限 0.55 m/s、第二圈 0.32 m/s（第二圈更保守，因为要等红灯/终点）。 */
-    speed = fminf(r->lap == 1 ? 0.55f : 0.32f, sqrtf(0.55f / (fabsf(curve) + 0.01f)));
+    /* 菜单巡航转速换算成 v_target；第一圈直接用 v_target，第二圈更保守
+     * （至少 0.32 m/s，按 v_target 同比例收）。曲率段把横向加速度
+     * a=v²|k| 限制在 max(0.55, 0.30·v_target²)。默认 v_target≈0.55 m/s
+     * 时与改动前的公式完全一致。 */
+    v_target = (isfinite(r->target_rpm) && r->target_rpm > 0.0f)
+             ? TRACK_RPM_TO_MPS(Track_ClampRpm(r->target_rpm)) : 0.55f;
+    lap_v = (r->lap == 1) ? v_target
+          : fminf(v_target, fmaxf(0.32f, v_target * (0.32f / 0.55f)));
+    a_lat = fmaxf(0.55f, 0.30f * v_target * v_target);
+    speed = fminf(lap_v, sqrtf(a_lat / (fabsf(curve) + 0.01f)));
     /* 丢线或只拿到单边估计：都降到保持速度，单边估计不能用于高速巡线。 */
     if (r->degraded) speed = fminf(speed, TRACK_HOLD_SPEED_MPS);
     /* 低置信度或环岛/十字：再压到 0.24 m/s。o 为 NULL 时上面的保持速度已经兜底，

@@ -6,7 +6,7 @@
  * ----------------------------------------------------------------------------
  * 板端菜单的全部逻辑，界面只依赖 MenuView 快照，不直接读控制对象：
  *   1. Menu_Init()          ：建立组/项环形链表，菜单回到组页；
- *   2. Menu_StartCondition()：能否发车的 6 种条件；
+ *   2. Menu_StartCondition()：能否发车的 7 种条件 + 连续 3 帧有效赛道确认；
  *   3. Menu_Key()           ：沿链表导航、增益编辑、动作返回；
  *   4. Menu_ShowResult()    ：跳转到数独结果页；
  *   5. Menu_DrawRow()       ：按行渲染，每行只算自己需要的字段。
@@ -28,6 +28,9 @@
  *   static const char *node_name(uint8_t node)
  *   void           Menu_Init(MenuState *m)
  *   StartCondition Menu_StartCondition(...)
+ *   uint16_t       Menu_GetRaceRpm(const MenuState *m)
+ *   void           Menu_Disarm(MenuState *m)
+ *   MenuAction     Menu_PollArmed(MenuState *m, StartCondition start)
  *   MenuAction     Menu_Key(...)
  *   void           Menu_ShowResult(MenuState *m)
  *   void           Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint8_t result)
@@ -57,32 +60,33 @@ typedef struct {
 
 enum {
     NODE_RACE_BASE    = MENU_GROUPS,             /* 4：Race 第一项 */
-    NODE_SENSORS_BASE = NODE_RACE_BASE + 3,      /* 7：Sensors 第一项 */
-    NODE_LEFT_BASE    = NODE_SENSORS_BASE + 3,   /* 10：左轮 PID 第一项 */
-    NODE_RIGHT_BASE   = NODE_LEFT_BASE + 4,      /* 14：右轮 PID 第一项 */
-    MENU_NODE_COUNT   = NODE_RIGHT_BASE + 4      /* 18：节点总数 */
+    NODE_SENSORS_BASE = NODE_RACE_BASE + 4,      /* 8：Sensors 第一项 */
+    NODE_LEFT_BASE    = NODE_SENSORS_BASE + 3,   /* 11：左轮 PID 第一项 */
+    NODE_RIGHT_BASE   = NODE_LEFT_BASE + 4,      /* 15：右轮 PID 第一项 */
+    MENU_NODE_COUNT   = NODE_RIGHT_BASE + 4      /* 19：节点总数 */
 };
 
 static MenuNode s_nodes[MENU_NODE_COUNT] = {
     /* 组节点（0..3），first/count 指向该组第一项和项数 */
-    {"比赛控制",       MENU_RACE,      0, NODE_RACE_BASE,    3, 0, 0},
+    {"比赛控制",       MENU_RACE,      0, NODE_RACE_BASE,    4, 0, 0},
     {"传感器监控",     MENU_SENSORS,   0, NODE_SENSORS_BASE, 3, 0, 0},
     {"左轮内环PID",    MENU_LEFT_PID,  0, NODE_LEFT_BASE,    4, 0, 0},
     {"右轮内环PID",    MENU_RIGHT_PID, 0, NODE_RIGHT_BASE,   4, 0, 0},
-    /* Race 项（4..6） */
-    {"发车启动",    MENU_RACE, 0, 0, 0, 0, 0},
-    {"比赛状态",    MENU_RACE, 1, 0, 0, 0, 0},
-    {"数独结果",    MENU_RACE, 2, 0, 0, 0, 0},
-    /* Sensors 项（7..9） */
+    /* Race 项（4..7） */
+    {"发车启动",       MENU_RACE, 0, 0, 0, 0, 0},
+    {"比赛状态",       MENU_RACE, 1, 0, 0, 0, 0},
+    {"数独结果",       MENU_RACE, 2, 0, 0, 0, 0},
+    {"比赛转速设置",   MENU_RACE, 3, 0, 0, 0, 0},
+    /* Sensors 项（8..10） */
     {"左右轮转速",     MENU_SENSORS, 0, 0, 0, 0, 0},
     {"陀螺仪 MPU6050", MENU_SENSORS, 1, 0, 0, 0, 0},
     {"视觉数据",       MENU_SENSORS, 2, 0, 0, 0, 0},
-    /* 左轮内环 PID 项（10..13） */
+    /* 左轮内环 PID 项（11..14） */
     {"比例 Kp",           MENU_LEFT_PID, 0, 0, 0, 0, 0},
     {"积分 Ki",           MENU_LEFT_PID, 1, 0, 0, 0, 0},
     {"微分 Kd",           MENU_LEFT_PID, 2, 0, 0, 0, 0},
     {"保存参数到Flash",   MENU_LEFT_PID, 3, 0, 0, 0, 0},
-    /* 右轮内环 PID 项（14..17） */
+    /* 右轮内环 PID 项（15..18） */
     {"比例 Kp",           MENU_RIGHT_PID, 0, 0, 0, 0, 0},
     {"积分 Ki",           MENU_RIGHT_PID, 1, 0, 0, 0, 0},
     {"微分 Kd",           MENU_RIGHT_PID, 2, 0, 0, 0, 0},
@@ -91,7 +95,7 @@ static MenuNode s_nodes[MENU_NODE_COUNT] = {
 
 /* 非节点表数据：发车原因、赛段、保存状态只用于显示，不参与导航。 */
 static const char *const conditions[] = {"条件就绪,可发车", "请先停车或清故障", "车轮仍在转动",
-    "正在求解数独结果", "等待识别有效赛道", "等待视觉 HELLO"};
+    "正在求解数独结果", "等待视觉功能开启", "等待识别有效赛道", "等待视觉 HELLO"};
 static const char *const phases[] = {"巡线","断路","绕障","红障停","完赛","故障"};
 enum { FB_NONE, FB_APPLIED, FB_STOP, FB_INVALID };
 
@@ -207,39 +211,160 @@ void Menu_Init(MenuState *m)
     }
     m->feedback = FB_NONE;
     m->candidate = 0U;
+    m->race_armed = 0U;
+    m->race_rpm = TRACK_DEFAULT_RPM;
     m->params_status = PARAMS_DEFAULTS;
 }
 
+/* 视觉功能是否编译进固件：关闭视觉时不允许“预备”，也不能发车。 */
+static int vision_compiled(void)
+{
+#if BOARD_VISION_ENABLE
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/* 发车转速夹紧与步进；口径与 Track_Fsm 的 TRACK_* 宏保持一致。 */
+static uint16_t clamp_rpm(unsigned rpm)
+{
+    unsigned hi = (unsigned)TRACK_MAX_RPM;
+
+    if ((float)hi > BOARD_RPM_LIMIT) hi = (unsigned)BOARD_RPM_LIMIT;
+    if (rpm < TRACK_MIN_RPM) return (uint16_t)TRACK_MIN_RPM;
+    if (rpm > hi) return (uint16_t)hi;
+    return (uint16_t)rpm;
+}
+
+static uint16_t step_rpm(unsigned current, uint8_t key_id, uint8_t key_type)
+{
+    unsigned hi = (unsigned)TRACK_MAX_RPM;
+    unsigned step = key_type == KEY_EVENT_REPEAT ? TRACK_RPM_STEP_COARSE : TRACK_RPM_STEP_FINE;
+
+    if ((float)hi > BOARD_RPM_LIMIT) hi = (unsigned)BOARD_RPM_LIMIT;
+    current = clamp_rpm(current);
+    if (key_id == KEY_UP) {
+        return (uint16_t)(current + step > hi ? hi : current + step);
+    }
+    return (uint16_t)(current < TRACK_MIN_RPM + step ? TRACK_MIN_RPM : current - step);
+}
+
 /*
- * 函数名称：Menu_StartCondition
- * 函数功能：判断“现在能不能发车”，返回具体原因供菜单显示。
- * 参数说明：car              —— 控制对象，只用 state 判断是否停车；
- *           still            —— 轮速是否近似为零（由平台层用 speed[] 判定）；
- *           pending          —— 是否正在准备数独结果（完赛收尾期间禁止新车）；
- *           road             —— 最新道路观测，NULL 表示本拍没有可用视觉帧；
- *           previous_session —— 上一场比赛绑定的视觉会话号。
- * 返回参数：发车条件枚举，只有 START_READY 才允许按 OK 发车。
+ * 函数名称：start_condition
+ * 函数功能：计算“这一帧如果有效，是否满足发车的静态条件”。
+ * 参数说明：car/still/pending/road/previous_session 同 Menu_StartCondition。
+ * 返回参数：START_READY 表示可以进入连续帧确认；其余为具体原因。
  * 备注信息：判断顺序即优先级，不能随意交换：
- *           1) 非 STOP -> 先停车/清故障；
- *           2) 车还在动 -> 等停稳；
- *           3) 正在算数独 -> 等结果；
- *           4) 没有视觉帧、曲率无效或置信度 <0.35 -> 等有效路况；
- *           5) 视觉会话号与上一场相同 -> 视觉端没重新开始，要求重启会话；
- *           全部通过才 READY。这样发车瞬间一定“停稳 + 有路 + 新会话”，
- *           避免一按 OK 就冲到上一场的旧曲率上。
+ *           1) 非 STOP -> 先停车/清故障；2) 车还在动 -> 等停稳；
+ *           3) 正在算数独 -> 等结果；4) 视觉未编译 -> 等待视觉功能；
+ *           5) 没有视觉帧或会话号为 0 -> 等待 HELLO；
+ *           6) 会话号与上一场相同 -> 视觉端没重新开始；
+ *           7) 曲率无效/单边估计/置信度 <0.35/仍有实体元素 -> 等有效赛道。
  */
-StartCondition Menu_StartCondition(const Car_Core *car, uint8_t still, uint8_t pending, const CarVisionObservation *road, uint32_t previous_session)
+static StartCondition start_condition(const Car_Core *car, uint8_t still, uint8_t pending,
+                                      const CarVisionObservation *road, uint32_t previous_session)
 {
     if (car == NULL) return START_STOP_FIRST;
     if (car->state != CAR_STOP) return START_STOP_FIRST;
     if (!still) return START_MOVING;
     if (pending) return START_RESULT;
-    /* 单边估计曲率只能用于巡线转向，不能作为发车依据。 */
-    if (!road || (road->valid_mask & VISION_CURVATURE_ESTIMATED) ||
-        !(road->valid_mask & VISION_CURVATURE_VALID) || !(road->confidence >= 0.35f))
-        return START_NO_ROAD;
+    if (!vision_compiled()) return START_NO_VISION;
+    if (!road || road->session == 0U) return START_NO_VISION;
     if (road->session == previous_session) return START_NEW_SESSION;
+    /* 单边估计曲率只能用于巡线转向，不能作为发车依据；有实体元素也不发车。 */
+    if (!(road->valid_mask & VISION_CURVATURE_VALID) ||
+        (road->valid_mask & VISION_CURVATURE_ESTIMATED) ||
+        !(road->confidence >= 0.35f) || road->element != VISION_ELEMENT_NONE)
+        return START_NO_ROAD;
     return START_READY;
+}
+
+/*
+ * 函数名称：Menu_StartCondition
+ * 函数功能：判断“现在能不能发车”，返回具体原因供菜单显示。
+ * 参数说明：confirm          —— 连续有效帧确认状态；首次传全 0；
+ *           car              —— 控制对象，只用 state 判断是否停车；
+ *           still            —— 轮速是否近似为零（由平台层用 speed[] 判定）；
+ *           pending          —— 是否正在准备数独结果（完赛收尾期间禁止新车）；
+ *           road             —— 最新道路观测，NULL 表示本拍没有可用视觉帧；
+ *           previous_session —— 上一场比赛绑定的视觉会话号。
+ * 返回参数：发车条件枚举，只有 START_READY 才允许按 OK 发车。
+ * 备注信息：静态条件通过后，还要连续 3 个同一会话、序号递增、未过期的
+ *           有效赛道帧才算 READY，防止单帧误检就发车。条件一旦中断，
+ *           确认计数立即清零。
+ */
+StartCondition Menu_StartCondition(MenuRoadConfirm *confirm, const Car_Core *car, uint8_t still, uint8_t pending, const CarVisionObservation *road, uint32_t previous_session)
+{
+    const unsigned required_frames = 3U;
+    StartCondition condition;
+    uint16_t delta;
+
+    if (confirm == NULL) return START_NO_ROAD;
+    condition = start_condition(car, still, pending, road, previous_session);
+    if (condition != START_READY) {
+        confirm->count = 0U;
+        return condition;
+    }
+
+    /* 会话变化或两帧间隔超过视觉时效：重新开始计数。 */
+    if (confirm->session != road->session ||
+        (uint32_t)(road->received_ms - confirm->received_ms) > VIS_MAX_AGE_MS) {
+        confirm->count = 0U;
+    }
+    if (confirm->count) {
+        delta = (uint16_t)(road->sequence - confirm->sequence);
+        if (delta == 0U) return confirm->count >= required_frames ? START_READY : START_NO_ROAD;
+        if (delta >= 0x8000U) {
+            confirm->count = 0U;
+            return START_NO_ROAD;
+        }
+    }
+    confirm->session = road->session;
+    confirm->sequence = road->sequence;
+    confirm->received_ms = road->received_ms;
+    if (confirm->count < required_frames) confirm->count++;
+    return confirm->count >= required_frames ? START_READY : START_NO_ROAD;
+}
+
+/* 读取比赛转速；0 或未初始化时回退到默认值，并夹到允许范围。 */
+uint16_t Menu_GetRaceRpm(const MenuState *m)
+{
+    if (m == NULL || m->race_rpm == 0U) return clamp_rpm(TRACK_DEFAULT_RPM);
+    return clamp_rpm(m->race_rpm);
+}
+
+/* 取消“预备自动发车”；任何停车/故障/离开页面路径都可以调用。 */
+void Menu_Disarm(MenuState *m)
+{
+    if (m != NULL) m->race_armed = 0U;
+}
+
+/*
+ * 函数名称：Menu_PollArmed
+ * 函数功能：检查“预备发车”状态；视觉就绪时返回 MENU_LAUNCH。
+ * 参数说明：m     —— 菜单状态；
+ *           start —— 当前发车条件。
+ * 返回参数：MENU_IDLE / MENU_LAUNCH。
+ * 备注信息：车动、故障、离开发车页或正在收尾时自动取消预备；
+ *           真正发车仍由平台层调用 Car_StartRace() 执行。
+ */
+MenuAction Menu_PollArmed(MenuState *m, StartCondition start)
+{
+    if (m == NULL || !m->race_armed) return MENU_IDLE;
+    if (!vision_compiled() || m->depth != 2U || m->group != MENU_RACE ||
+        m->item[MENU_RACE] != 0U || start == START_STOP_FIRST ||
+        start == START_MOVING || start == START_RESULT) {
+        m->race_armed = 0U;
+        return MENU_IDLE;
+    }
+    if (start == START_READY) {
+        m->race_rpm = Menu_GetRaceRpm(m);
+        m->race_armed = 0U;
+        m->item[MENU_RACE] = 1U;
+        return MENU_LAUNCH;
+    }
+    return MENU_IDLE;
 }
 
 /*
@@ -264,6 +389,7 @@ StartCondition Menu_StartCondition(const Car_Core *car, uint8_t still, uint8_t p
 MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCondition start)
 {
     uint8_t item, pid, next;
+    int start_page, rpm_page;
 
     if (m == NULL || car == NULL || key.id >= KEY_NUM) {
         return MENU_IDLE;
@@ -277,9 +403,20 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
     m->feedback = FB_NONE;
     item = m->item[m->group];
     pid = (uint8_t)(m->group >= MENU_LEFT_PID);
+    start_page = (m->group == MENU_RACE && item == 0U);
+    rpm_page = (m->group == MENU_RACE && item == 3U);
+
+    /* 车动、故障或正在收尾时一律取消预备，避免误自动发车。 */
+    if (car->state != CAR_STOP || start == START_STOP_FIRST ||
+        start == START_MOVING || start == START_RESULT) {
+        m->race_armed = 0U;
+    }
 
     if (key.id == KEY_BACK && key.type == KEY_EVENT_PRESS) {
-        if (m->depth) {
+        if (m->depth == 2U && start_page && m->race_armed) {
+            m->race_armed = 0U;                    /* 先取消等待，不退出页面 */
+        } else if (m->depth) {
+            m->race_armed = 0U;
             --m->depth;
             /* 退回组页时当前节点换成组节点；退回项页时仍是该项节点。 */
             m->node = (m->depth == 0U) ? m->group
@@ -297,6 +434,16 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
             } else {
                 m->item[m->group] = s_nodes[next].item;
             }
+        } else if (start_page) {
+            /* 发车页可直接调速；已预备时 UP 先取消等待，避免误改。 */
+            if (m->race_armed) {
+                if (key.id == KEY_UP) m->race_armed = 0U;
+            } else if (car->state == CAR_STOP) {
+                m->race_rpm = step_rpm(Menu_GetRaceRpm(m), key.id, key.type);
+            }
+        } else if (rpm_page) {
+            unsigned base = m->candidate ? m->candidate : Menu_GetRaceRpm(m);
+            m->candidate = step_rpm(base, key.id, key.type);
         } else if (pid && item < 3U) {
             /* Fine taps (Ki/Kd), coarse auto-repeat for larger changes. */
             unsigned step = key.type == KEY_EVENT_REPEAT ? 10U : 1U;
@@ -311,7 +458,9 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
             m->node = (uint8_t)(s_nodes[m->group].first + m->item[m->group]);
         } else if (m->depth == 1U) {
             m->depth = 2U;
-            if (pid && item < 3U) {
+            if (rpm_page) {
+                m->candidate = Menu_GetRaceRpm(m);
+            } else if (pid && item < 3U) {
                 Car_PidInc_Struct *p = &car->pid_speed[m->group - MENU_LEFT_PID];
                 float gains[] = {p->kp, p->ki, p->kd};
                 m->candidate = (unsigned)(gains[item]*100.0f+0.5f);
@@ -335,9 +484,32 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
             /* 先组装完整增益再一次性提交；失败只影响本次，不破坏已生效参数。 */
             result = Car_SetPid(car,wheel,gains[0],gains[1],gains[2]);
             m->feedback = result == 0 ? FB_APPLIED : (result == 1 ? FB_STOP : FB_INVALID);
-        } else if (m->group == MENU_RACE && item == 0U && start == START_READY) {
-            m->item[MENU_RACE] = 1U;
-            return MENU_LAUNCH;
+        } else if (rpm_page) {
+            /* 转速页：停车且未预备才允许应用；BACK 直接丢弃候选值。 */
+            if (car->state != CAR_STOP || m->race_armed) {
+                m->feedback = FB_STOP;
+            } else {
+                m->race_rpm = clamp_rpm(m->candidate ? m->candidate : Menu_GetRaceRpm(m));
+                m->candidate = m->race_rpm;
+                m->feedback = FB_APPLIED;
+            }
+        } else if (start_page) {
+            /* 发车页：就绪立即发车；视觉未就绪则切换“预备”，就绪后自动开跑。 */
+            m->race_rpm = Menu_GetRaceRpm(m);
+            if (!vision_compiled()) {
+                m->race_armed = 0U;
+                m->feedback = FB_INVALID;
+            } else if (start == START_READY) {
+                m->race_armed = 0U;
+                m->item[MENU_RACE] = 1U;
+                return MENU_LAUNCH;
+            } else if (start == START_NO_VISION || start == START_NO_ROAD ||
+                       start == START_NEW_SESSION) {
+                m->race_armed = (uint8_t)!m->race_armed;
+            } else {
+                m->race_armed = 0U;
+                m->feedback = FB_STOP;
+            }
         }
     }
     return MENU_IDLE;
@@ -360,6 +532,7 @@ void Menu_ShowResult(MenuState *m)
     m->depth = 2U;
     m->group = MENU_RACE;
     m->item[MENU_RACE] = 2U;
+    m->race_armed = 0U;
     m->feedback = FB_NONE;
     menu_sanitize(m);
 }
@@ -385,7 +558,7 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
     const MenuState *m;
     UI_Style_Enum style = UI_STYLE_NORMAL;
     char s[LCD_LINE_BYTES] = "";
-    unsigned group, item, count, depth, start, status, phase_count;
+    unsigned group, item, count, depth, start, status, phase_count, rpm;
 
     if (v == NULL || row >= LCD_ROWS) {
         return;
@@ -408,6 +581,7 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
     if (start >= (unsigned)START_COUNT) {
         start = (unsigned)START_NO_ROAD;
     }
+    rpm = v->race_rpm ? clamp_rpm(v->race_rpm) : Menu_GetRaceRpm(m);
 
     if (row == 0) {
         style = UI_STYLE_TITLE;
@@ -416,9 +590,14 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
         style = UI_STYLE_HINT;
         if (v->state != CAR_STOP) {
             snprintf(s,sizeof s,"PE10: 急停/清故障");
+        } else if (m->race_armed) {
+            snprintf(s,sizeof s,"OK/返回/PE10: 取消等待");
         } else if (depth < 2U) {
             snprintf(s,sizeof s,"上下移动  OK进入  返回上级");
-        } else if (group >= MENU_LEFT_PID && item < 3U) {
+        } else if (group == MENU_RACE && item == 0U) {
+            snprintf(s,sizeof s,"上下调RPM  OK发车  返回");
+        } else if ((group == MENU_RACE && item == 3U) ||
+                   (group >= MENU_LEFT_PID && item < 3U)) {
             snprintf(s,sizeof s,"上下调节  OK应用  返回放弃");
         } else if (group >= MENU_LEFT_PID && item == 3U) {
             snprintf(s,sizeof s,"OK写入Flash  返回");
@@ -439,11 +618,13 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             if (n == (depth ? item : group)) style = UI_STYLE_SELECT;
             snprintf(s,sizeof s,"%s %s",style == UI_STYLE_SELECT ? ">" : " ",name);
         } else if (depth == 0U && row == 5U) {
-            /* 设备状态页：摄像头由香橙派 TYPE=3 状态帧报告，不依赖比赛会话。 */
+            /* 设备状态页：摄像头由香橙派 TYPE=3 状态帧报告，不依赖比赛会话。
+             * 没有状态帧但道路帧新鲜时，说明旧版香橙派仍在出图，按已连接兜底。 */
             if (!v->vision_enabled) {
                 style = UI_STYLE_HINT;
                 snprintf(s,sizeof s,"摄像头: 已关闭");
-            } else if (v->camera_status == VISION_CAMERA_STREAMING) {
+            } else if (v->camera_status == VISION_CAMERA_STREAMING ||
+                       (v->camera_status == VISION_CAMERA_UNKNOWN && v->fresh)) {
                 style = UI_STYLE_GOOD;
                 snprintf(s,sizeof s,"摄像头: 已连接");
             } else if (v->camera_status == VISION_CAMERA_NO_FRAME) {
@@ -454,6 +635,7 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
                 snprintf(s,sizeof s,"摄像头: 无法确认");
             }
         } else if (depth == 0U && row == 6U) {
+            /* 香橙派链路只看是否收到合法帧，与相机是否出图无关。 */
             if (!v->vision_enabled) {
                 style = UI_STYLE_HINT;
                 snprintf(s,sizeof s,"香橙派: 已关闭");
@@ -464,14 +646,78 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
                 style = UI_STYLE_WARN;
                 snprintf(s,sizeof s,"香橙派: 未连接");
             }
+        } else if (depth == 0U && row == 7U) {
+            style = v->bt_connected ? UI_STYLE_GOOD : UI_STYLE_WARN;
+            snprintf(s,sizeof s,"蓝牙上位机: %s", v->bt_connected ? "已连接" : "未连接");
         }
     } else if (row == 1) {
         snprintf(s,sizeof s,"%s",node_name((uint8_t)(s_nodes[group].first + item)));
     } else if (group == MENU_RACE && item == 0U) {
-        if (row == 3) snprintf(s,sizeof s,"%s",conditions[start]);
-        if (row == 5 && start == START_READY) {
-            style = UI_STYLE_EDIT;
-            snprintf(s,sizeof s,"OK: 立即发车");
+        if (row == 2) {
+            style = (!m->race_armed && v->state == CAR_STOP) ? UI_STYLE_EDIT : UI_STYLE_NORMAL;
+            snprintf(s,sizeof s,"目标 %3u rpm (%.2f m/s)",rpm,(double)TRACK_RPM_TO_MPS(rpm));
+        } else if (row == 3) {
+            if (!v->vision_enabled) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉: 配置已关闭");
+            } else if (!v->fresh) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"%s", v->session_valid ? "视觉: 数据过期(无新帧)" :
+                         "视觉: 未开启(等--hello)");
+            } else if (start == (unsigned)START_NEW_SESSION) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉: 等待 HELLO");
+            } else if (start == (unsigned)START_NO_ROAD) {
+                style = UI_STYLE_WARN;
+                if (!(v->obs.valid_mask & VISION_CURVATURE_VALID))
+                    snprintf(s,sizeof s,"无有效曲率  元素 %u",(unsigned)v->obs.element);
+                else if (v->obs.valid_mask & VISION_CURVATURE_ESTIMATED)
+                    snprintf(s,sizeof s,"等待实测曲率");
+                else if (!(v->obs.confidence >= 0.35f))
+                    snprintf(s,sizeof s,"置信度 %.3f < 0.350",(double)v->obs.confidence);
+                else if (v->obs.element != VISION_ELEMENT_NONE)
+                    snprintf(s,sizeof s,"元素 %u  等待元素 0",(unsigned)v->obs.element);
+                else
+                    snprintf(s,sizeof s,"有效赛道帧 %u/3",(unsigned)v->launch_road_count);
+            } else {
+                float conf = isfinite(v->obs.confidence) ? v->obs.confidence : 0.0f;
+                if (conf < 0.0f) conf = 0.0f;
+                if (conf > 1.0f) conf = 1.0f;
+                style = UI_STYLE_GOOD;
+                snprintf(s,sizeof s,"视觉: 已开启 置信度 %.2f",(double)conf);
+            }
+        } else if (row == 4) {
+            snprintf(s,sizeof s,"%s",conditions[start]);
+        } else if (row == 5) {
+            if (m->race_armed) {
+                style = UI_STYLE_EDIT;
+                snprintf(s,sizeof s,"OK/返回: 取消等待发车");
+            } else if (v->vision_enabled && start == (unsigned)START_READY) {
+                style = UI_STYLE_EDIT;
+                snprintf(s,sizeof s,"OK: 立即发车 (%u rpm)",rpm);
+            } else if (v->vision_enabled && (start == (unsigned)START_NO_VISION ||
+                       start == (unsigned)START_NO_ROAD ||
+                       start == (unsigned)START_NEW_SESSION)) {
+                style = UI_STYLE_EDIT;
+                snprintf(s,sizeof s,"OK: 预备(就绪自动开跑)");
+            }
+        } else if (row == 6) {
+            if (m->feedback == FB_STOP) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"请先停车并保持车轮静止");
+            } else if (m->feedback == FB_INVALID) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"请开启 BOARD_VISION_ENABLE=1");
+            } else if (m->race_armed) {
+                style = UI_STYLE_HINT;
+                snprintf(s,sizeof s,"电机已锁停,视觉就绪即跑");
+            } else if (v->state == CAR_STOP) {
+                style = UI_STYLE_HINT;
+                snprintf(s,sizeof s,"上下键: +-5 rpm(长按+-20)");
+            }
+        } else if (row == 7) {
+            style = UI_STYLE_HINT;
+            snprintf(s,sizeof s,"发车页也可直接上下调速");
         }
     } else if (group == MENU_RACE && item == 1U) {
         phase_count = (unsigned)(sizeof phases / sizeof phases[0]);
@@ -488,6 +734,26 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             style = UI_STYLE_WARN;
             snprintf(s,sizeof s,"视觉丢失: 保持上次曲率");
         }
+        if (row == 7) {
+            float spd0 = isfinite(v->speed[0]) ? v->speed[0] : 0.0f;
+            float spd1 = isfinite(v->speed[1]) ? v->speed[1] : 0.0f;
+            spd0 = fmaxf(-999.0f, fminf(999.0f, spd0));
+            spd1 = fmaxf(-999.0f, fminf(999.0f, spd1));
+            snprintf(s,sizeof s,"设%3u L%4.0f R%4.0f rpm",rpm,(double)spd0,(double)spd1);
+        }
+    } else if (group == MENU_RACE && item == 3U) {
+        unsigned edit_rpm = clamp_rpm(m->candidate ? m->candidate : rpm);
+        if (row == 2) snprintf(s,sizeof s,"当前 %3u rpm (%.2f m/s)",rpm,(double)TRACK_RPM_TO_MPS(rpm));
+        if (row == 3) {
+            style = UI_STYLE_EDIT;
+            snprintf(s,sizeof s,"编辑 %3u rpm (%.2f m/s)",edit_rpm,(double)TRACK_RPM_TO_MPS(edit_rpm));
+        }
+        if (row == 4) snprintf(s,sizeof s,"范围 %u..%u rpm",(unsigned)TRACK_MIN_RPM,(unsigned)TRACK_MAX_RPM);
+        if (row == 5) snprintf(s,sizeof s,"上下+-5(连发+-20)  OK确认");
+        if (row == 6) snprintf(s,sizeof s,"%s", m->feedback == FB_APPLIED ? "已生效" :
+                               (v->state != CAR_STOP || m->feedback == FB_STOP ? "请先停车再应用" :
+                                "按返回键放弃修改"));
+        if (row == 7) snprintf(s,sizeof s,"发车页也可直接上下调速");
     } else if (group == MENU_RACE) {
         if (row == 2 && result != SUDOKU_SOLVED) {
             const char *status_text = "采集中: 完赛后自动求解";

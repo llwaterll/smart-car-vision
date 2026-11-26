@@ -47,6 +47,7 @@ int main(void)
 {
     Car_Core car;
     MenuState menu = {0};
+    MenuRoadConfirm confirm = {0};
     CarVisionObservation road = {0};
     MenuView view = {0};
     uint8_t board[36] = {0};
@@ -75,21 +76,65 @@ int main(void)
     assert(menu.params_status==PARAMS_BUSY);
     assert(press(&menu,&car,KEY_OK,START_READY)==MENU_IDLE);
     memset(&menu,0,sizeof menu);
+    memset(&confirm,0,sizeof confirm);
     road.session = 12;
     road.valid_mask = VISION_CURVATURE_VALID;
     road.confidence = 0.9f;
-    assert(Menu_StartCondition(&car,1,0,&road,11) == START_READY);
-    assert(Menu_StartCondition(&car,0,0,&road,11) == START_MOVING);
-    assert(Menu_StartCondition(&car,1,1,&road,11) == START_RESULT);
-    assert(Menu_StartCondition(&car,1,0,NULL,11) == START_NO_ROAD);
-    road.confidence = NAN;
-    assert(Menu_StartCondition(&car,1,0,&road,11) == START_NO_ROAD);
-    road.confidence = 0.9f;
-    assert(Menu_StartCondition(&car,1,0,&road,12) == START_NEW_SESSION);
+#if BOARD_VISION_ENABLE
+    road.sequence = 65534U;
+    road.received_ms = 10U;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    for (unsigned tick = 0; tick < 4; ++tick)
+        assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    road.sequence = 0U;                 /* 序号回绕，但中间夹着非道路业务帧 */
+    road.received_ms = 20U;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    road.sequence = 1U;
+    road.received_ms = 30U;
+    road.element = VISION_ELEMENT_CROSS;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    road.element = VISION_ELEMENT_NONE;
+    for (unsigned i = 1; i <= 3; ++i) { /* 连续 3 帧有效赛道才 READY */
+        ++road.sequence;
+        road.received_ms += 40U;
+        assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) ==
+               (i == 3 ? START_READY : START_NO_ROAD));
+    }
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_READY);
+    ++road.sequence;
+    road.received_ms += VIS_MAX_AGE_MS + 1U; /* 帧间隔超时：重新计数 */
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    ++road.sequence;
+    road.received_ms += VIS_MAX_AGE_MS;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    ++road.sequence;
+    road.received_ms += 10U;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_READY);
+    road.session = 13U;                 /* 会话切换：重新确认 */
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    road.session = 12U;
     /* Single-side estimated curvature may steer, but must never launch. */
     road.valid_mask = VISION_CURVATURE_VALID | VISION_CURVATURE_ESTIMATED;
-    assert(Menu_StartCondition(&car,1,0,&road,11) == START_NO_ROAD);
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
     road.valid_mask = VISION_CURVATURE_VALID;
+    assert(Menu_StartCondition(&confirm,&car,0,0,&road,11) == START_MOVING);
+    assert(Menu_StartCondition(&confirm,&car,1,1,&road,11) == START_RESULT);
+    assert(Menu_StartCondition(&confirm,&car,1,0,NULL,11) == START_NO_VISION);
+    road.session = 0U;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_VISION);
+    road.session = 12U;
+    road.confidence = NAN;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_ROAD);
+    road.confidence = 0.9f;
+    road.valid_mask = 0;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,12) == START_NEW_SESSION);
+    road.valid_mask = VISION_CURVATURE_VALID;
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,12) == START_NEW_SESSION);
+#else
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_NO_VISION);
+    assert(Menu_StartCondition(&confirm,&car,0,0,&road,11) == START_MOVING);
+    assert(Menu_StartCondition(&confirm,&car,1,1,&road,11) == START_RESULT);
+#endif
 
     /* Entering either menu level must never start a motor. Long OK cannot launch. */
     assert(press(&menu,&car,KEY_OK,START_READY) == MENU_IDLE && menu.depth == 1);
@@ -103,8 +148,77 @@ int main(void)
     assert(menu.item[MENU_RACE] == 1);
     assert(press(&menu,&car,KEY_OK,START_READY) == MENU_IDLE);
     assert(Car_StartRace(&car));
-    assert(Menu_StartCondition(&car,1,0,&road,11) == START_STOP_FIRST);
+    assert(Menu_StartCondition(&confirm,&car,1,0,&road,11) == START_STOP_FIRST);
     Car_LocalStop(&car);
+
+    /* Race RPM (4th item): fine/coarse edit, BACK discards, OK applies. */
+    Menu_Init(&menu);
+    press(&menu,&car,KEY_OK,START_READY);          /* 进入比赛控制组 */
+    press(&menu,&car,KEY_UP,START_READY);          /* 环形链表上一项 = 比赛转速 */
+    assert(menu.item[MENU_RACE] == 3);
+    assert(press(&menu,&car,KEY_OK,START_READY) == MENU_IDLE && menu.depth == 2);
+    assert(menu.candidate == TRACK_DEFAULT_RPM);
+    press(&menu,&car,KEY_UP,START_READY);
+    assert(menu.candidate == TRACK_DEFAULT_RPM + TRACK_RPM_STEP_FINE);
+    {
+        Key_Event_Struct repeat = {KEY_UP,KEY_EVENT_REPEAT};
+        assert(Menu_Key(&menu,repeat,&car,START_READY) == MENU_IDLE);
+    }
+    assert(menu.candidate == TRACK_DEFAULT_RPM + TRACK_RPM_STEP_FINE + TRACK_RPM_STEP_COARSE);
+    press(&menu,&car,KEY_BACK,START_READY);
+    assert(menu.depth == 1 && Menu_GetRaceRpm(&menu) == TRACK_DEFAULT_RPM);
+    press(&menu,&car,KEY_OK,START_READY);
+    {
+        Key_Event_Struct repeat = {KEY_DOWN,KEY_EVENT_REPEAT};
+        assert(Menu_Key(&menu,repeat,&car,START_READY) == MENU_IDLE);
+    }
+    press(&menu,&car,KEY_OK,START_READY);
+    assert(Menu_GetRaceRpm(&menu) == TRACK_DEFAULT_RPM - TRACK_RPM_STEP_COARSE);
+    /* 运行中不能应用转速。 */
+    assert(Car_StartRace(&car));
+    press(&menu,&car,KEY_UP,START_STOP_FIRST);
+    press(&menu,&car,KEY_OK,START_STOP_FIRST);
+    assert(Menu_GetRaceRpm(&menu) == TRACK_DEFAULT_RPM - TRACK_RPM_STEP_COARSE);
+    Car_LocalStop(&car);
+
+    /* 发车页直接调速 + 预备自动发车。 */
+    Menu_Init(&menu);
+    press(&menu,&car,KEY_OK,START_READY);
+    press(&menu,&car,KEY_OK,START_READY);
+    press(&menu,&car,KEY_DOWN,START_NO_VISION);
+    assert(Menu_GetRaceRpm(&menu) == TRACK_DEFAULT_RPM - TRACK_RPM_STEP_FINE);
+    menu.race_rpm = TRACK_MIN_RPM;
+    press(&menu,&car,KEY_DOWN,START_NO_VISION);
+    assert(Menu_GetRaceRpm(&menu) == TRACK_MIN_RPM);
+    menu.race_rpm = TRACK_MAX_RPM;
+    press(&menu,&car,KEY_UP,START_NO_VISION);
+    assert(Menu_GetRaceRpm(&menu) == TRACK_MAX_RPM);
+    menu.race_rpm = 120U;
+#if BOARD_VISION_ENABLE
+    assert(press(&menu,&car,KEY_OK,START_NO_VISION) == MENU_IDLE && menu.race_armed == 1U);
+    assert(Menu_PollArmed(&menu,START_NO_ROAD) == MENU_IDLE && menu.race_armed == 1U);
+    memset(&confirm,0,sizeof confirm);
+    road.element = VISION_ELEMENT_NONE;
+    road.valid_mask = VISION_CURVATURE_VALID;
+    road.confidence = 0.9f;
+    road.session = 12U;
+    for (unsigned i = 1; i <= 3; ++i) {
+        StartCondition state;
+        ++road.sequence;
+        road.received_ms += 40U;
+        state = Menu_StartCondition(&confirm,&car,1,0,&road,11);
+        assert(Menu_PollArmed(&menu,state) == (i == 3 ? MENU_LAUNCH : MENU_IDLE));
+    }
+    assert(menu.race_armed == 0U && menu.item[MENU_RACE] == 1U && Menu_GetRaceRpm(&menu) == 120U);
+    menu.item[MENU_RACE] = 0U;
+    assert(press(&menu,&car,KEY_OK,START_READY) == MENU_LAUNCH);
+    assert(menu.item[MENU_RACE] == 1U);
+    assert(press(&menu,&car,KEY_OK,START_READY) == MENU_IDLE);
+    assert(Car_StartRace(&car));
+    Car_LocalStop(&car);
+#else
+    assert(press(&menu,&car,KEY_OK,START_NO_VISION) == MENU_IDLE && menu.race_armed == 0U);
+#endif
 
     memset(&menu,0,sizeof menu);
     press(&menu,&car,KEY_UP,START_READY);
@@ -154,7 +268,7 @@ int main(void)
     menu.group = MENU_RACE;
     menu.item[MENU_RACE] = 99;
     press(&menu,&car,KEY_UP,START_READY);
-    assert(menu.group == MENU_RACE && menu.item[MENU_RACE] < 3);
+    assert(menu.group == MENU_RACE && menu.item[MENU_RACE] < 4);
 
     /* Invalid key ids and NULL objects are ignored instead of being dereferenced. */
     {
@@ -163,7 +277,7 @@ int main(void)
         assert(Menu_Key(&menu,bad,&car,START_READY) == MENU_IDLE);
         assert(Menu_Key(NULL,ok,&car,START_READY) == MENU_IDLE);
     }
-    assert(Menu_StartCondition(NULL,1,0,&road,11) == START_STOP_FIRST);
+    assert(Menu_StartCondition(&confirm,NULL,1,0,&road,11) == START_STOP_FIRST);
     Menu_ShowResult(NULL);
     Menu_DrawRow(NULL,0,board,0);
 
@@ -173,7 +287,7 @@ int main(void)
     view.imu_present = 1;
     for (group=0; group<MENU_GROUPS; ++group) {
         view.menu.group = (uint8_t)group;
-        for (item=0; item<(group>=MENU_LEFT_PID?4U:3U); ++item) {
+        for (item=0; item<(group==MENU_RACE?4U:(group>=MENU_LEFT_PID?4U:3U)); ++item) {
             view.menu.item[group] = (uint8_t)item;
             for (row=0; row<LCD_ROWS; ++row) Menu_DrawRow(&view,row,board,2);
         }
@@ -230,6 +344,12 @@ int main(void)
     assert(strstr(rows[5],"已关闭"));
     Menu_DrawRow(&view,6,board,0);
     assert(strstr(rows[6],"已关闭"));
+    view.bt_connected = 1;
+    Menu_DrawRow(&view,7,board,0);
+    assert(strstr(rows[7],"已连接"));
+    view.bt_connected = 0;
+    Menu_DrawRow(&view,7,board,0);
+    assert(strstr(rows[7],"未连接"));
 
     /* Out-of-range row/start/phase/save-status must clamp, never index out of bounds. */
     Menu_DrawRow(&view,LCD_ROWS,board,0);
@@ -238,8 +358,8 @@ int main(void)
     view.menu.group = MENU_RACE;
     view.menu.item[MENU_RACE] = 0;
     view.start = (StartCondition)99;
-    Menu_DrawRow(&view,3,board,0);
-    assert(strstr(rows[3],"等待识别"));
+    Menu_DrawRow(&view,4,board,0);
+    assert(strstr(rows[4],"等待识别"));
     view.menu.item[MENU_RACE] = 1;
     view.lap = 1;
     view.phase = 99;

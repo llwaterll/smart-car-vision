@@ -53,6 +53,9 @@
 #define VIS_FRAME_GAP_MS  50U
 #define VIS_MAX_AGE_MS    200U
 #define VIS_STATUS_TIMEOUT_MS 1000U
+/* 香橙派链路超时：任意 CRC 正确的帧（HELLO/状态/道路/数独）都算在线。
+ * 状态线程约 250 ms 一帧、HELLO 约 1 s 一帧，取 1.5 s 容忍偶发丢帧。 */
+#define VIS_LINK_TIMEOUT_MS 1500U
 
 /* 摄像头状态：香橙派每约 250 ms 用 TYPE=3 帧报告一次；1 s 没收到就按未知处理。 */
 typedef enum {
@@ -149,6 +152,10 @@ typedef struct
     uint32_t rejected_frames;  /* CRC 正确但业务字段不合法的帧数 */
     uint32_t camera_status_ms; /* 最近一次收到摄像头状态帧的时间 */
     CarVisionCameraStatus camera_status; /* 最近一次摄像头状态 */
+    /* 香橙派链路：任一 CRC 通过帧都刷新时间戳，用于区分“串口没数据”
+     * 和“有数据但相机无画面”。 */
+    uint32_t link_frame_ms;    /* 最近一次 CRC 通过帧的本机时间，单位毫秒 */
+    uint8_t link_seen;         /* 1 表示本次上电后至少收到过一帧合法帧 */
 
     CarVisionObservation observation; /* 最近一份有效道路观测 */
 
@@ -187,6 +194,17 @@ void CarVision_CloseRaceSession(CarVision *v);
  * @note 摄像头状态独立于比赛会话和道路检测，仅用于 LCD 诊断。
  */
 CarVisionCameraStatus CarVision_GetCameraStatus(const CarVision *v, uint32_t now_ms);
+
+/**
+ * @brief 香橙派链路是否在线。
+ * @param v      解析器对象，须非空。
+ * @param now_ms 当前毫秒时间。
+ * @return 1 表示超时时间内收到过任意 CRC 正确的帧；0 表示没有数据或已超时。
+ * @note 与道路帧 200 ms 时效、摄像头状态帧 1 s 时效相互独立：
+ *       HELLO、状态帧、道路帧、数独帧任意一种都能证明香橙派与串口在工作。
+ *       业务层用该结果区分“香橙派没连上”和“连上了但相机没画面”。
+ */
+uint8_t CarVision_LinkAlive(const CarVision *v, uint32_t now_ms);
 
 /**
  * @brief 更新一个字节的 CRC16-CCITT-FALSE，返回新的累计值。
