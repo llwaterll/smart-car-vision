@@ -1,0 +1,363 @@
+version: "4.1"
+name: NEUQ_STM32F407VET6_Opensource_Library
+type: ARM
+deviceName: null
+packDir: null
+srcDirs: []
+virtualFolder:
+  name: <virtual_root>
+  files:
+    - path: startup_stm32f407xx.s
+  folders:
+    - name: ..
+      files: []
+      folders:
+        - name: Library
+          files: []
+          folders:
+            - name: HAL_lib
+              files: []
+              folders:
+                - name: Core
+                  files: []
+                  folders:
+                    - name: Src
+                      files:
+                        - path: ../Library/HAL_lib/Core/Src/main.c
+                        - path: ../Library/HAL_lib/Core/Src/stm32f4xx_hal_msp.c
+                        - path: ../Library/HAL_lib/Core/Src/stm32f4xx_it.c
+                        - path: ../Library/HAL_lib/Core/Src/system_stm32f4xx.c
+                      folders: []
+                - name: STM32F4xx_HAL_Driver
+                  files: []
+                  folders:
+                    - name: Src
+                      files:
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_adc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_adc_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cec.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_crc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cryp.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cryp_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dac.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dac_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dcmi.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dcmi_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dfsdm.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma2d.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dsi.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_eth.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ramfunc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_fmpi2c.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_fmpi2c_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_fmpsmbus.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_fmpsmbus_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_hash.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_hash_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_hcd.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2s.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2s_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_irda.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_iwdg.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_lptim.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_ltdc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_ltdc_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_mmc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_nand.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_nor.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pccard.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_qspi.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rng.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sai.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sai_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sd.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sdram.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_smartcard.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_smbus.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spdifrx.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sram.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_usart.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_wwdg.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_adc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_crc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_dac.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_dma.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_dma2d.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_exti.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_fmc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_fmpi2c.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_fsmc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_gpio.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_i2c.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_lptim.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_pwr.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_rcc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_rng.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_rtc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_sdmmc.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_spi.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_tim.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usart.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c
+                        - path: ../Library/HAL_lib/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_utils.c
+                      folders: []
+            - name: NEUQ_lib
+              files: []
+              folders:
+                - name: NEUQ_lib_APP
+                  files:
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_APP/NEUQ_Filter.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_APP/NEUQ_IMU_Solve.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_APP/NEUQ_PID.c
+                  folders: []
+                - name: NEUQ_lib_Debug
+                  files:
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Debug/NEUQ_Assert.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Debug/NEUQ_Debug_ZF_Interface.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Debug/NEUQ_UART_Debug.c
+                  folders: []
+                - name: NEUQ_lib_Device
+                  files:
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Device/NEUQ_LCD200.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Device/NEUQ_MPU6050.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Device/NEUQ_OV5640.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Device/NEUQ_OV7725.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Device/NEUQ_OV9281.c
+                  folders: []
+                - name: NEUQ_lib_Driver
+                  files:
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_ADC.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_CONSTS.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Delay.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_EXTI.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Encoder.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_FIFO.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Flash.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_GPIO.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Hard_IIC.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Hard_SPI.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_PIT.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_PWM.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Soft_IIC.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Soft_SPI.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Timer.c
+                    - path: ../Library/NEUQ_lib/NEUQ_lib_Driver/NEUQ_Uart.c
+                  folders: []
+        - name: User
+          files:
+            - path: ../User/NEUQ_Interrupts.c
+            - path: ../User/NEUQ_Main.c
+          folders: []
+    - name: CODE
+      files:
+        - path: ../CODE/Board_Config.h
+        - path: ../CODE/Menu_Task.c
+        - path: ../CODE/Menu_Task.h
+        - path: ../CODE/Drv_Motor.c
+        - path: ../CODE/Drv_Motor.h
+        - path: ../CODE/Drv_Encoder.c
+        - path: ../CODE/Drv_Encoder.h
+        - path: ../CODE/Drv_Key.c
+        - path: ../CODE/Drv_Key.h
+        - path: ../CODE/Drv_Lcd.c
+        - path: ../CODE/Drv_Lcd.h
+        - path: ../CODE/Drv_Lcd_FontZh.h
+        - path: ../CODE/Drv_Gyro.c
+        - path: ../CODE/Drv_Gyro.h
+        - path: ../CODE/Drv_Clock.c
+        - path: ../CODE/Drv_Clock.h
+        - path: ../CODE/Drv_Uart.c
+        - path: ../CODE/Drv_Uart.h
+        - path: ../CODE/Proto_Bluetooth.c
+        - path: ../CODE/Proto_Bluetooth.h
+        - path: ../CODE/Proto_Vision.c
+        - path: ../CODE/Proto_Vision.h
+        - path: ../CODE/Proto_Vofa.c
+        - path: ../CODE/Proto_Vofa.h
+        - path: ../CODE/Pid.c
+        - path: ../CODE/Pid.h
+        - path: ../CODE/Pid_Storage.c
+        - path: ../CODE/Pid_Storage.h
+        - path: ../CODE/Sudoku.c
+        - path: ../CODE/Sudoku.h
+        - path: ../CODE/Task_Fsm.c
+        - path: ../CODE/Task_Fsm.h
+        - path: ../CODE/Track_Fsm.c
+        - path: ../CODE/Track_Fsm.h
+        - path: ../CODE/Platform_Main.c
+        - path: ../CODE/Platform_Main.h
+      folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: dd4afd27a399435c35ff912cb8659c28
+targets:
+  NEUQ_STM32F407VET6_Opensource_Library:
+    cppPreprocessAttrs:
+      defineList:
+        - USE_HAL_DRIVER
+        - STM32F407xx
+      incList:
+        - .
+        - ../Library/HAL_lib/Core/Inc
+        - ../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc
+        - ../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc/Legacy
+        - ../Library/NEUQ_lib
+        - ../Library/NEUQ_lib/NEUQ_lib_APP
+        - ../Library/NEUQ_lib/NEUQ_lib_Debug
+        - ../Library/NEUQ_lib/NEUQ_lib_Device
+        - ../Library/NEUQ_lib/NEUQ_lib_Driver
+        - ../User
+        - ../CODE
+      libList: []
+    excludeList: []
+    settings:
+      debugger: cortex-debug
+    toolchain: AC5
+    toolchainConfigMap:
+      AC5:
+        archExtensions: ""
+        cpuType: Cortex-M4
+        floatingPointHardware: single
+        options:
+          version: 4
+          afterBuildTasks: []
+          asm-compiler:
+            defines: []
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: --locale=english
+            C_FLAGS: --locale=english
+            c99-mode: true
+            one-elf-section-per-function: true
+            optimization: level-0
+            warnings: all-warnings
+          global:
+            output-debug-info: enable
+            use-microLIB: false
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            output-format: elf
+            ro-base: ""
+            rw-base: ""
+            xo-base: ""
+        scatterFilePath: ""
+        storageLayout:
+          RAM:
+            - id: 1
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 3
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 1
+              isChecked: true
+              mem:
+                size: "0x1c000"
+                startAddr: "0x20000000"
+              noInit: false
+              tag: IRAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x4000"
+                startAddr: "0x2001c000"
+              noInit: false
+              tag: IRAM
+          ROM:
+            - id: 1
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 3
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 1
+              isChecked: true
+              isStartup: true
+              mem:
+                size: "0x40000"
+                startAddr: "0x8000000"
+              tag: IROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: IROM
+        useCustomScatterFile: false
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+      STLink:
+        address: "0x8000000"
+        bin: ""
+        elFile: None
+        optionBytes: .eide/neuq_stm32f407vet6_opensource_library.st.option.bytes.ini
+        otherCmds: ""
+        proType: SWD
+        resetMode: default
+        runAfterProgram: true
+        speed: 4000
+    uploader: STLink
