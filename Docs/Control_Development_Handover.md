@@ -124,11 +124,12 @@ flowchart TD
 | 左编码器 A/B | TIM4 PB6/PB7 | 正交四倍频 |
 | 右编码器 A/B | TIM3 PA6/PA7 | 与外部 Flash SPI1 冲突 |
 | 蓝牙 | USART1 PA9 TX / PA10 RX，9600 8N1 | NEUQ 库索引 `UART_0` / `CAR_UART_INDEX=0` |
-| 香橙派视觉 | USART3 PB10 TX / PB11 RX，115200 8N1 | NEUQ 索引 `UART_2`；与蓝牙分属不同串口，可同时启用 |
+| 香橙派视觉 | UART4 PC10 TX / PC11 RX，115200 8N1 | NEUQ 索引 `UART_3`；双向：接收观测，PC10 回 STATUS；与蓝牙分属不同串口 |
 | 调试打印 | 关闭 | USART1 由蓝牙独占，LCD/I²C 初始化时的 printf 不发送到串口 |
 | MPU6050 | I²C3 PA8 SCL / PC9 SDA，400 kHz | 7 位地址 0x68；库宏使用移位地址 `0x68 << 1` |
 | LCD | SPI3 PB3 SCK、PB5 MOSI、PB4 CS | DC=PD5，BL=PD3，RST=PE2 |
-| 四个按键 | PE10 上、PE8 下、PE7 确认、PE9 返回 | 均低有效；运行/故障时 PE10 优先停车/清故障 |
+| 四个按键 | PE10 上、PE8 下、PE7 确认、PE9 返回 | 均低有效；运行/故障时 PE10 优先停车/清最近故障码；历史在 Sensors→故障记录 |
+| 电池电压 | ADC1_IN10 / PC0 | 电池必须经分压后接入，引脚 ≤3.3 V；每 60 s 采样一次，菜单显示 |
 | 外部 W25Q | PB0 CS，SPI1 PA5/PA6/PA7 | 初始化拉高 PB0 后不使用该 Flash；不能为存参数重新启用 SPI1 |
 | 内部参数 Flash | S6/S7：0x08040000–0x0807FFFF | 链接区必须排除，详见第 9 节 |
 | 时间资源 | TIM6 控制节拍；TIM5 实际周期计时 | 新功能不得占用这些定时器 |
@@ -147,7 +148,7 @@ flowchart TD
 | 参考加速度/加加速度 | 200 rpm/s；800 rpm/s² | `Board_Config.h`；自主流式参考只有加速度限幅，不能声称同时保证 jerk |
 | 测速窗口 | 8 个控制周期（40 ms）计数滑动平均 | `TASK_WINDOW_TICKS`；单计数约 3.4 rpm |
 | 速度反馈低通 | 0.015 s | `CAR_SPEED_FILTER_TAU_S`；叠加在窗口之后 |
-| 默认 PID | 两轮均 Kp=8.0，Ki=0.30，Kd=0 | `Board_Config.h`；有效保存记录优先于这些默认值，详见[调参指引](Speed_PID_Tuning_Guide.md) |
+| 默认 PID | 两轮均 Kp=14.0，Ki=1.0，Kd=0 | `CODE/Pid.h`；有效保存记录优先于这些默认值，详见[调参指引](Speed_PID_Tuning_Guide.md) |
 | 微分滤波/目标权重 | 0.020 s / 1.0 | `CAR_PID_D_TAU_S` / `CAR_PID_SETPOINT_WEIGHT` |
 | 前馈 | Ks/Kv/Ka 均为 0 | `Board_Config.h`，未做本车辨识 |
 | 轮半径/轮距 | 0.0325 m / 0.173 m | `CODE/Task_Fsm.h`，轮距为几何初值 |
@@ -195,6 +196,15 @@ D 项   = -Kd × 0.005 × d(measure)/dt
 
 **自主模式中 `task/Task_Fsm.c` 会拒绝所有蓝牙命令，包括蓝牙 STOP。** 当前比赛停车入口是 PE10，不能把上位机停止按钮当作自主比赛的有效急停。若后续要增加遥控急停，需要显式修改控制权规则并补充回归测试。
 
+默认 `CAR_FAULT_STOP_ENABLE=0`：故障只按码记录，不停车、不锁存、不清输出。
+当前 `CAR_FAULT_DERATE_PERCENT=0`，故障也**不降速**，完全按目标轮速运行；
+改成 10 可恢复“最近一次故障后参考轮速最多下调 10%，保持 1 s、
+多个故障不叠加”的模式。菜单 `Sensors → 故障记录` 显示每个故障码的次数和
+最近发生时间，UP/DOWN 翻页，OK 清空记录且不停车。PE10 仍会停车并清
+“最近故障码”，但不清历史记录。把 `Board_Config.h` 的
+`CAR_FAULT_STOP_ENABLE` 改为 1 可恢复传统模式：锁存第一个故障、清输出并
+进入 `CAR_FAULT`，必须先 STOP 清除。
+
 | 故障码 | 含义 | 定位重点 |
 |---|---|---|
 | 0 | 无故障 | 正常 STOP/RUN |
@@ -204,15 +214,22 @@ D 项   = -Kd × 0.005 × d(measure)/dt
 | 4 | 蓝牙接收异常 | 手动时 FIFO/串口错误；自主不由蓝牙错误接管控制 |
 | 5 | 控制周期异常 | TIM5 初始化、长时间阻塞、实际 dt 越界 |
 | 6 | 控制器配置或数值异常 | 非法参数、NaN/Inf、PID fault |
-| 7 | 比赛失效或动作越界 | 视觉过期、非预期丢路、断路/绕障超时或越界 |
+| 7 | 比赛失效或动作越界 | 视觉过期、非预期丢路、断路/绕障超时或越界；赛段 FAULT 仍执行任务级停车 |
+| 8 | 超速 | 实测 >900 rpm 持续 100 ms |
 
 ## 7. 比赛状态机和数独收尾
 
-发车路径：`Race → Start race → Ready → 再按 PE7`。条件包括 STOP、两轮低于 2 rpm、没有待处理终点结果、新鲜且曲率有效的道路、置信度至少 0.35，以及未被上一轮发车使用的视觉 session。启动后自动显示比赛状态。
+发车路径：`Race → Start race → Ready → 再按 PE7`。视觉就绪前按 OK 会进入“预备”，
+自动握手完成后开跑。条件包括 STOP、两轮低于 2 rpm、没有待处理终点结果、
+视觉会话已建立（`SESSION_VALID`）、200 ms 内连续 3 个同会话且序号递增的道路帧、
+曲率有效且不是单边估计、置信度至少 0.35、元素为 0，以及该 session 未被上一轮使用。
+首页第 6 行区分“未连接 / 未握手 / 协议错误 / 已连接”；发车页第 3 行区分
+“链路离线 / 等待握手 / 握手后无帧 / 协议错误 / 已开启”。启动后自动显示比赛状态。
+图像端必须带 `--publish-curvature`；`--single-edge-send` 的 bit4 不能发车。
 
 | 状态 | 当前动作与结束条件 |
 |---|---|
-| `RACE_TRACK` | 消费曲率并计算 `omega=v×curvature`；第一圈直线速度上限 0.55 m/s，第二圈 0.32 m/s；随曲率、置信度、元素和距终点剩余路程减速 |
+| `RACE_TRACK` | 消费曲率并计算 `omega=v×curvature`；第一圈按菜单转速全速（默认 300 rpm≈1.02 m/s），第二圈保留原比例上限（约 0.59 m/s）；曲率、置信度、元素和终点包络减速已关闭 |
 | `RACE_GAP` | 视觉断路候选且满足进场约束后，以 0.22 m/s 和入场航向保持穿越；至少走 1.30 m 后连续 3 个不同道路帧确认恢复；超过 1.95 m 或 12.5 s 失败 |
 | `RACE_BYPASS` | 黄障距离有效且≤0.80 m 时进入；根据测得前向/侧向位移跟踪偏移再回道；有 12 s、航向和越界限制 |
 | `RACE_RED` | 第二圈红障距离≤0.20 m 时进入；静止后连续计满 5 s 再巡线；有 12 s 超时 |
@@ -221,7 +238,7 @@ D 项   = -Kd × 0.005 × d(measure)/dt
 
 正常巡线当前直接用视觉曲率；收到的 lateral/heading 没有作为独立外环误差使用。环岛/十字主要依靠视觉端选线与任务降速，未实现完整路径图导航。绿色通过；蓝锥桶依赖边界和净空，没有独立锥桶定位控制器。
 
-普通巡线遇到单帧无曲率或 UART 断流时不再直接停车：沿用最近有效曲率、降速到 0.18 m/s，并在 LCD 显示 `VISION LOST`；`RACE_VISION_LOST_STOP_MS` 默认 0，设为非零毫秒数可恢复有界失效停车。断路仍需要持续收到新鲜视觉消息：可发送“在线但无道路”的观测；接回白路须连续三帧确认，超过 1.95 m 或 12.5 s 未接回仍会停车。`VISION_ELEMENT_FINISH` 只是协议枚举，当前终点实际由累计里程触发。
+普通巡线遇到单帧无曲率或 UART 断流时不再直接停车：沿用最近有效曲率并按当前目标速度继续行驶（当前全速模式不再降到 0.18 m/s），LCD 显示 `VISION LOST`；`RACE_VISION_LOST_STOP_MS` 默认 0，设为非零毫秒数可恢复有界失效停车。断路仍需要持续收到新鲜视觉消息：可发送“在线但无道路”的观测；接回白路须连续三帧确认，超过 1.95 m 或 12.5 s 未接回仍会停车。`VISION_ELEMENT_FINISH` 只是协议枚举，当前终点实际由累计里程触发。
 
 终点收尾由 `finish_tick()` 与 `poll_menu()` 协作：
 
@@ -307,7 +324,14 @@ A5 5A | VERSION u8 | TYPE u8 | LEN u16 | SEQ u16
       | SESSION u32 | AGE_MS u16 | PAYLOAD | CRC16 u16
 ```
 
-VERSION=1，多字节字段大端；CRC16-CCITT-FALSE：0x1021、初值 0xFFFF、不反射、xorout=0，覆盖 VERSION 到 PAYLOAD。HELLO(TYPE=0/LEN=0) 只在允许停车建会话时接受；TRACK(TYPE=1/LEN=16) 为道路/元素；TILE(TYPE=2/LEN=10) 为块号加九格。
+VERSION=1，多字节字段大端；CRC16-CCITT-FALSE：0x1021、初值 0xFFFF、不反射、xorout=0，覆盖 VERSION 到 PAYLOAD。HELLO(TYPE=0/LEN=0) 只在允许停车建会话时接受；TRACK(TYPE=1/LEN=16) 为道路/元素；TILE(TYPE=2/LEN=10) 为块号加九格；CAMERA_STATUS(TYPE=3/LEN=1) 只用于相机诊断。
+
+反向 STATUS（F407 -> 香橙派）：帧头 `5A A5`、VERSION=1、TYPE=0x01、LEN=26，
+总长 36 字节；字段为 state/fault/flags/reject/bound_session/accepted/rejected/bad/
+obs_age_ms/uptime_ms，CRC 覆盖偏移 2..33。周期 100 ms，state/flags/bound_session
+变化立即发，最小间隔 20 ms。flags：ALLOW_HELLO、SESSION_VALID、FINISH_PENDING、
+UART_FAULT、OBS_FRESH、AUTONOMOUS、LINK_ALIVE。详细偏移见
+[视觉通信接口](Vision_Interface.md)。
 
 关键契约：
 
@@ -317,7 +341,12 @@ VERSION=1，多字节字段大端；CRC16-CCITT-FALSE：0x1021、初值 0xFFFF�
 - 道路快照返回成功仍可能 `valid_mask=0`；自主巡线需要曲率有效位，不能只凭“有新帧”继续巡线。
 - 块号 0/1/2/3 = 左上/右上/左下/右下；九格行优先、0 空白、1–6 数字，未知不是空白。数独块在当前会话保留，不套用道路的 200 ms 缓存寿命。
 - UART 错误仅使道路和半帧失效，保留已验证的数独块；`protocol/Proto_Vision.h` 末尾个别旧注释与此不一致时，以 `CarVision_Invalidate()` 实现为准。
-- v1 无 ACK，视觉帧不直接写电机；图像侧 Event/ACK 实验接口尚未成为双方线协议。
+- 自动握手：图像端只在 `STOP + ALLOW_HELLO + !FINISH_PENDING` 时发 HELLO，未绑定前每
+  300 ms 重试；绑定后停 HELLO。F407 结束一轮（`CarVision_CloseRaceSession`）、复位
+  （`uptime_ms` 回退）或 reject=3/5 时，图像端自动换新 session 重绑。状态断流
+  超过 1000 ms 只停 HELLO，已绑定会话的 TYPE=1 继续。
+- STATUS 不是动作 ACK：视觉帧不直接写电机；图像侧 Event/ACCEPTED/COMPLETED 实验
+  接口尚未成为双方线协议。HELLO 绑定成功和有效 TYPE=1 都会把 `last_reject` 清 0。
 
 道路载荷每个字段偏移、缩放与范围以 [视觉通信接口](Vision_Interface.md) 为准；扩展前必须与图像人员共同修改接收器、发送器、Python 编码器和测试，不要直接发送 C 结构体内存。
 
@@ -326,14 +355,14 @@ VERSION=1，多字节字段大端；CRC16-CCITT-FALSE：0x1021、初值 0xFFFF�
 | 想做的工作 | 修改起点 | 同步检查 |
 |---|---|---|
 | 换电机、改减速比/编码器 | `Board_Config.h` 的 CPR、符号及限幅 | 转速、里程、圈数、断路距离会一起受影响 |
-| 修改内环速度环增益/算法 | `Board_Config.h` 默认值或蓝牙命令 4；算法在 `pid/Pid` | 测速窗口、dt、Ki/Kd 语义、复位、饱和、换向、左右轮一致性；先看[调参指引](Speed_PID_Tuning_Guide.md)，不能只增加新函数而不切调用 |
+| 修改内环速度环增益/算法 | `CODE/Pid.h` 默认值或蓝牙命令 4；算法在 `CODE/Pid.c` | 测速窗口、dt、Ki/Kd 语义、复位、饱和、换向、左右轮一致性；先看[调参指引](Speed_PID_Tuning_Guide.md)，不能只增加新函数而不切调用 |
 | 改轮径/轮距/绕行方向 | `CODE/Task_Fsm.h` | 运动学单位、陀螺符号、双圈仿真 |
 | 增加赛项/盲盒 | `RacePhase`、`Track_Step()` | 明确进入/结束/超时/重复触发；同步菜单阶段名称数组和 `test_car_race.c` |
 | 接入真正终点 | `Track_Step()` 的完成条件及视觉契约 | 不能把任何 FINISH 候选直接当已确认终点；保持后续静止/收块/求解流程 |
 | 增加菜单页 | `menu/Menu_Task.h/.c` | 分类和条目数量、索引、32字符行宽、返回/长按、状态门控与渲染测试 |
 | 增加掉电参数 | `Pid_Storage`、Flash适配、菜单状态 | 版本兼容、校验、默认值、断电回退、链接区及迁移策略 |
 | 增加传感器/遥测 | 前台采样、时间戳快照、`Proto_Vofa` | 不阻塞PIT；若改变16通道布局同步所有上位机解析 |
-| 改串口/引脚 | `Board_Config.h`、驱动、回调和硬件错误处理 | 当前编译约束固定蓝牙索引3、视觉索引2，仅改一个宏不构成完整迁移 |
+| 改串口/引脚 | `Board_Config.h`、驱动、回调和硬件错误处理 | 当前编译约束固定蓝牙 `UART_0`、视觉 `UART_3`（UART4 PC10/PC11）；仅改一个宏不构成完整迁移 |
 
 新增 `.c` 必须加入 `MDK-ARM/*.uvprojx` 的文件组；主机测试脚本手写了源文件列表，也要同步。保留底层库版权与许可证声明。
 

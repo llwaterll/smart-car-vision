@@ -85,6 +85,9 @@ class DrivingSafetyTests(unittest.TestCase):
         self.app.sample = None
         self.app.last_rx = host.time.monotonic()
         self.app.next_tx = 0
+        # 这些用例只验证使能/停车安全，不验证空闲心跳；把心跳截止放到无穷远，
+        # 保持原有“发送序列只含使能/停车帧”的断言。
+        self.app.next_hb = float('inf')
         self.app.rpm = Var(60)
         self.app.status = Var('')
         self.app.values = Var('')

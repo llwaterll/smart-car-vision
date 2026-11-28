@@ -9,7 +9,7 @@
  *
  *   外设资源
  *     USART1（PA9/PA10）-> 蓝牙 JDY-31：命令下行 + VOFA+ 遥测上行
- *     UART4（PC10/PC11）-> 香橙派视觉：只下行（STM32 侧只收不发）
+ *     UART4（PC10/PC11）-> 香橙派视觉：接收观测帧，STATUS 反向上行
  *
  *   运行视角
  *     RX 中断 -> Car_UART_RX_Handler / Car_Vision_UART_RX_Handler 只写 FIFO；
@@ -114,5 +114,16 @@ void Car_UART_RX_Handler(uint8_t byte);
  * 返回参数：无。
  */
 void Car_Vision_UART_RX_Handler(uint8_t byte);
+
+/*
+ * 函数名称：Uart_SendVisionStatus
+ * 函数功能：非阻塞发送一帧 F407 -> Pi 的 STATUS 帧。
+ * 参数说明：data —— 至少 36 字节的完整帧；
+ *           len  —— 帧长，必须为 VISION_STATUS_FRAME_SIZE。
+ * 返回参数：1 已启动发送；0 忙、参数无效或视觉功能关闭。
+ * 备注信息：发送忙时直接丢弃本帧，不等待；不得在 5 ms 控制中断里阻塞。
+ *           完成中断只清忙标志，不影响 UART4 接收。
+ */
+uint8_t Uart_SendVisionStatus(const uint8_t *data, uint16_t len);
 
 #endif

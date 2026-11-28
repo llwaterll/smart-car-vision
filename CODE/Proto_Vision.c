@@ -150,17 +150,19 @@ void CarVision_Init(CarVision *v)
  *     {
  *         CarVision_Invalidate(&vision);
  *     }
- * 备注信息：保留会话和序号历史，继续拒绝重复帧或旧帧，
- *           避免异常后立刻接受旧数据。
+ * 备注信息：保留会话、序号、链路和摄像头状态：
+ *           一次 UART 错误不等于“链路断开/相机无画面”。链路和相机状态
+ *           分别由 VIS_LINK_TIMEOUT_MS / VIS_STATUS_TIMEOUT_MS 超时淘汰，
+ *           这样单次 ORE/噪声不会让首页两行同时闪成未连接。
+ *           Collected tiles are persistent evidence for this session. Only a new
+ *           HELLO clears them; a later UART fault must not erase an earlier tile.
  */
 void CarVision_Invalidate(CarVision *v)
 {
-    v->used = 0;                  /* 清空未消费字节 */
-    v->have_observation = 0;      /* 道路观测失效 */
-    v->camera_status = VISION_CAMERA_UNKNOWN; /* 串口异常后不再相信旧状态 */
-    v->link_seen = 0;             /* 串口异常后不再认为香橙派链路在线 */
-    /* Collected tiles are persistent evidence for this session. Only a new
-     * HELLO clears them; a later UART fault must not erase an earlier tile. */
+    v->used = 0;                  /* 只丢弃可能被截断的半帧 */
+    v->have_observation = 0;      /* 道路观测需要下一帧重新确认 */
+    /* link_seen/link_frame_ms 和 camera_status/camera_status_ms 保留，
+     * 由各自的超时决定是否过期。 */
 }
 
 /*
@@ -278,6 +280,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
     /* 版本必须为 1，会话编号不能为 0。 */
     if (f[2] != 1 || session == 0)
     {
+        v->last_reject = VISION_REJECT_VERSION;
         v->rejected_frames++;
         return;
     }
@@ -292,6 +295,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
             {
                 v->have_observation = 0;
                 v->have_sequence = 0;
+                v->last_reject = VISION_REJECT_NONE;  /* 链路恢复后的合法 HELLO 清除旧拒绝 */
                 v->accepted_frames++;
             }
             return;
@@ -300,6 +304,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
         /* 只有停车且未在收尾时才允许绑定新会话。 */
         if (!allow_hello)
         {
+            v->last_reject = VISION_REJECT_HELLO;
             v->rejected_frames++;
             return;
         }
@@ -312,6 +317,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
         }
         v->session = session;
         v->session_valid = 1;
+        v->last_reject = VISION_REJECT_NONE;  /* 绑定成功后的首帧 STATUS 不携带旧拒绝 */
         v->accepted_frames++;
         return;
     }
@@ -319,8 +325,15 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
     /* STATUS 仅用于显示。即使未绑定比赛会话，也可报告相机故障。 */
     if (type == 3)
     {
-        if (len != 1 || seq != 0 || age != 0 || p[0] > 1U)
+        if (len != 1 || seq != 0 || age != 0)
         {
+            v->last_reject = VISION_REJECT_TYPE_LENGTH;
+            v->rejected_frames++;
+            return;
+        }
+        if (p[0] > 1U)
+        {
+            v->last_reject = VISION_REJECT_PAYLOAD;
             v->rejected_frames++;
             return;
         }
@@ -330,9 +343,15 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
     }
 
     /* 非 HELLO 帧必须属于当前会话，且发送端处理年龄不能超限。 */
-    if (!v->session_valid || session != v->session ||
-        age > VIS_MAX_AGE_MS)
+    if (!v->session_valid || session != v->session)
     {
+        v->last_reject = VISION_REJECT_SESSION;
+        v->rejected_frames++;
+        return;
+    }
+    if (age > VIS_MAX_AGE_MS)
+    {
+        v->last_reject = VISION_REJECT_AGE;
         v->rejected_frames++;
         return;
     }
@@ -345,6 +364,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
 
     if (v->have_sequence && (delta == 0U || delta >= 0x8000U))
     {
+        v->last_reject = VISION_REJECT_SEQUENCE;
         v->rejected_frames++;
         return;
     }
@@ -374,6 +394,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
             (p[11] > 7U && p[11] != 255U) ||
             u16(p + 14) != 0U)
         {
+            v->last_reject = VISION_REJECT_PAYLOAD;
             v->rejected_frames++;
             return;
         }
@@ -397,6 +418,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
 
         v->observation = o;                         /* 提交新观测 */
         v->have_observation = 1;
+        v->last_reject = VISION_REJECT_NONE;        /* 有效 TYPE=1 清除最近拒绝原因 */
     }
     else if (type == 2 && len == 10)
     {
@@ -405,6 +427,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
 
         if (p[0] > 3U)                              /* 块号只能是 0~3 */
         {
+            v->last_reject = VISION_REJECT_TILE;
             v->rejected_frames++;
             return;
         }
@@ -414,6 +437,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
             /* 格值允许 0~6；其他值视为协议错误。 */
             if (p[i] > 6U)
             {
+                v->last_reject = VISION_REJECT_TILE;
                 v->rejected_frames++;
                 return;
             }
@@ -432,6 +456,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
     else
     {
         /* 未知类型或长度不符。 */
+        v->last_reject = VISION_REJECT_TYPE_LENGTH;
         v->rejected_frames++;
         return;
     }

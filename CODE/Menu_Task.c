@@ -6,7 +6,7 @@
  * ----------------------------------------------------------------------------
  * 板端菜单的全部逻辑，界面只依赖 MenuView 快照，不直接读控制对象：
  *   1. Menu_Init()          ：建立组/项环形链表，菜单回到组页；
- *   2. Menu_StartCondition()：能否发车的 7 种条件 + 连续 3 帧有效赛道确认；
+ *   2. Menu_StartCondition()：能否发车的 10 种条件 + 连续 3 帧有效赛道确认；
  *   3. Menu_Key()           ：沿链表导航、增益编辑、动作返回；
  *   4. Menu_ShowResult()    ：跳转到数独结果页；
  *   5. Menu_DrawRow()       ：按行渲染，每行只算自己需要的字段。
@@ -61,15 +61,15 @@ typedef struct {
 enum {
     NODE_RACE_BASE    = MENU_GROUPS,             /* 4：Race 第一项 */
     NODE_SENSORS_BASE = NODE_RACE_BASE + 4,      /* 8：Sensors 第一项 */
-    NODE_LEFT_BASE    = NODE_SENSORS_BASE + 3,   /* 11：左轮 PID 第一项 */
-    NODE_RIGHT_BASE   = NODE_LEFT_BASE + 4,      /* 15：右轮 PID 第一项 */
-    MENU_NODE_COUNT   = NODE_RIGHT_BASE + 4      /* 19：节点总数 */
+    NODE_LEFT_BASE    = NODE_SENSORS_BASE + 4,   /* 12：左轮 PID 第一项 */
+    NODE_RIGHT_BASE   = NODE_LEFT_BASE + 4,      /* 16：右轮 PID 第一项 */
+    MENU_NODE_COUNT   = NODE_RIGHT_BASE + 4      /* 20：节点总数 */
 };
 
 static MenuNode s_nodes[MENU_NODE_COUNT] = {
     /* 组节点（0..3），first/count 指向该组第一项和项数 */
     {"比赛控制",       MENU_RACE,      0, NODE_RACE_BASE,    4, 0, 0},
-    {"传感器监控",     MENU_SENSORS,   0, NODE_SENSORS_BASE, 3, 0, 0},
+    {"传感器监控",     MENU_SENSORS,   0, NODE_SENSORS_BASE, 4, 0, 0},
     {"左轮内环PID",    MENU_LEFT_PID,  0, NODE_LEFT_BASE,    4, 0, 0},
     {"右轮内环PID",    MENU_RIGHT_PID, 0, NODE_RIGHT_BASE,   4, 0, 0},
     /* Race 项（4..7） */
@@ -77,27 +77,44 @@ static MenuNode s_nodes[MENU_NODE_COUNT] = {
     {"比赛状态",       MENU_RACE, 1, 0, 0, 0, 0},
     {"数独结果",       MENU_RACE, 2, 0, 0, 0, 0},
     {"比赛转速设置",   MENU_RACE, 3, 0, 0, 0, 0},
-    /* Sensors 项（8..10） */
+    /* Sensors 项（8..11） */
     {"左右轮转速",     MENU_SENSORS, 0, 0, 0, 0, 0},
     {"陀螺仪 MPU6050", MENU_SENSORS, 1, 0, 0, 0, 0},
     {"视觉数据",       MENU_SENSORS, 2, 0, 0, 0, 0},
-    /* 左轮内环 PID 项（11..14） */
+    {"故障记录",       MENU_SENSORS, 3, 0, 0, 0, 0},
+    /* 左轮内环 PID 项（12..15） */
     {"比例 Kp",           MENU_LEFT_PID, 0, 0, 0, 0, 0},
     {"积分 Ki",           MENU_LEFT_PID, 1, 0, 0, 0, 0},
     {"微分 Kd",           MENU_LEFT_PID, 2, 0, 0, 0, 0},
     {"保存参数到Flash",   MENU_LEFT_PID, 3, 0, 0, 0, 0},
-    /* 右轮内环 PID 项（15..18） */
+    /* 右轮内环 PID 项（16..19） */
     {"比例 Kp",           MENU_RIGHT_PID, 0, 0, 0, 0, 0},
     {"积分 Ki",           MENU_RIGHT_PID, 1, 0, 0, 0, 0},
     {"微分 Kd",           MENU_RIGHT_PID, 2, 0, 0, 0, 0},
     {"保存参数到Flash",   MENU_RIGHT_PID, 3, 0, 0, 0, 0},
 };
 
-/* 非节点表数据：发车原因、赛段、保存状态只用于显示，不参与导航。 */
-static const char *const conditions[] = {"条件就绪,可发车", "请先停车或清故障", "车轮仍在转动",
-    "正在求解数独结果", "等待视觉功能开启", "等待识别有效赛道", "等待视觉 HELLO"};
+/* 非节点表数据：发车原因、赛段、保存状态只用于显示，不参与导航。
+ * conditions[] 必须与 StartCondition 的枚举顺序一一对应。 */
+static const char *const conditions[] = {
+    "条件就绪,可发车",      /* START_READY */
+    "请先停车或清故障",    /* START_STOP_FIRST */
+    "车轮仍在转动",        /* START_MOVING */
+    "正在求解数独结果",    /* START_RESULT */
+    "视觉功能已关闭",      /* START_NO_VISION */
+    "等待视觉握手",        /* START_NO_SESSION */
+    "视觉无新帧",          /* START_NO_FRAME */
+    "视觉协议错误",        /* START_VISION_ERROR */
+    "等待有效赛道",        /* START_NO_ROAD */
+    "等待视觉新会话"       /* START_NEW_SESSION */
+};
 static const char *const phases[] = {"巡线","断路","绕障","红障停","完赛","故障"};
-enum { FB_NONE, FB_APPLIED, FB_STOP, FB_INVALID };
+/* 故障记录页的简称，下标与 CAR_*_FAULT 一致。 */
+static const char *const fault_names[CAR_FAULT_CODES] = {
+    "无故障", "通信超时", "堵转", "方向异常", "接收异常",
+    "控制周期", "控制器", "比赛故障", "超速"
+};
+enum { FB_NONE, FB_APPLIED, FB_STOP, FB_INVALID, FB_VISION };
 
 static uint8_t s_linked;
 
@@ -169,6 +186,9 @@ static void menu_sanitize(MenuState *m)
     if (m->group >= MENU_GROUPS) {
         m->group = MENU_RACE;
     }
+    if (m->fault_page > 1U) {
+        m->fault_page = 0U;
+    }
     for (g = 0; g < MENU_GROUPS; g++) {
         if (m->item[g] >= s_nodes[g].count) {
             m->item[g] = 0U;
@@ -212,6 +232,7 @@ void Menu_Init(MenuState *m)
     m->feedback = FB_NONE;
     m->candidate = 0U;
     m->race_armed = 0U;
+    m->fault_page = 0U;
     m->race_rpm = TRACK_DEFAULT_RPM;
     m->params_status = PARAMS_DEFAULTS;
 }
@@ -251,18 +272,44 @@ static uint16_t step_rpm(unsigned current, uint8_t key_id, uint8_t key_type)
 }
 
 /*
+ * 函数名称：VisionHs_Phase
+ * 函数功能：由视觉启用/链路/会话/新鲜帧/最近拒绝原因计算握手阶段。
+ * 参数说明：enabled       —— BOARD_VISION_ENABLE；
+ *           link_alive    —— 是否收到任意 CRC 正确帧；
+ *           session_valid —— 是否已绑定 HELLO 会话；
+ *           fresh         —— 200 ms 内是否有新鲜 TYPE=1；
+ *           reject        —— 最近一次业务拒绝原因。
+ * 返回参数：VisionHandshakePhase。
+ * 备注信息：判定顺序固定，菜单和发车条件共用同一份结果，避免两处判断漂移。
+ */
+VisionHandshakePhase VisionHs_Phase(uint8_t enabled, uint8_t link_alive,
+                                    uint8_t session_valid, uint8_t fresh, uint8_t reject)
+{
+    if (!enabled) return VISION_HS_OFF;
+    if (!link_alive) return VISION_HS_OFFLINE;
+    if (reject == VISION_REJECT_PAYLOAD || reject == VISION_REJECT_TYPE_LENGTH ||
+        reject == VISION_REJECT_TILE)
+        return VISION_HS_ERROR;
+    if (!session_valid) return VISION_HS_WAIT_HELLO;
+    if (!fresh) return VISION_HS_STALE;
+    return VISION_HS_BOUND;
+}
+
+/*
  * 函数名称：start_condition
  * 函数功能：计算“这一帧如果有效，是否满足发车的静态条件”。
- * 参数说明：car/still/pending/road/previous_session 同 Menu_StartCondition。
+ * 参数说明：car/still/pending/hs/road/previous_session 同 Menu_StartCondition。
  * 返回参数：START_READY 表示可以进入连续帧确认；其余为具体原因。
  * 备注信息：判断顺序即优先级，不能随意交换：
  *           1) 非 STOP -> 先停车/清故障；2) 车还在动 -> 等停稳；
- *           3) 正在算数独 -> 等结果；4) 视觉未编译 -> 等待视觉功能；
- *           5) 没有视觉帧或会话号为 0 -> 等待 HELLO；
- *           6) 会话号与上一场相同 -> 视觉端没重新开始；
- *           7) 曲率无效/单边估计/置信度 <0.35/仍有实体元素 -> 等有效赛道。
+ *           3) 正在算数独 -> 等结果；4) 视觉未编译 -> 视觉功能已关闭；
+ *           5) 未绑定会话 -> 等待握手；6) 已绑定但无新帧 -> 视觉无新帧；
+ *           7) 协议错误 -> 视觉协议错误；
+ *           8) 有帧但会话号与上一场相同 -> 视觉端没重新开始；
+ *           9) 曲率无效/单边估计/置信度 <0.35/仍有实体元素 -> 等有效赛道。
  */
 static StartCondition start_condition(const Car_Core *car, uint8_t still, uint8_t pending,
+                                      const VisionHandshake *hs,
                                       const CarVisionObservation *road, uint32_t previous_session)
 {
     if (car == NULL) return START_STOP_FIRST;
@@ -270,7 +317,26 @@ static StartCondition start_condition(const Car_Core *car, uint8_t still, uint8_
     if (!still) return START_MOVING;
     if (pending) return START_RESULT;
     if (!vision_compiled()) return START_NO_VISION;
-    if (!road || road->session == 0U) return START_NO_VISION;
+    if (hs == NULL) return START_NO_SESSION;
+
+    switch (hs->phase) {
+    case VISION_HS_OFF:
+        return START_NO_VISION;
+    case VISION_HS_ERROR:
+        return START_VISION_ERROR;
+    case VISION_HS_OFFLINE:
+        return hs->session_valid ? START_NO_FRAME : START_NO_SESSION;
+    case VISION_HS_WAIT_HELLO:
+        return START_NO_SESSION;
+    case VISION_HS_STALE:
+        return START_NO_FRAME;
+    case VISION_HS_BOUND:
+        break;
+    default:
+        return START_NO_SESSION;
+    }
+
+    if (!road || road->session == 0U) return START_NO_FRAME;
     if (road->session == previous_session) return START_NEW_SESSION;
     /* 单边估计曲率只能用于巡线转向，不能作为发车依据；有实体元素也不发车。 */
     if (!(road->valid_mask & VISION_CURVATURE_VALID) ||
@@ -287,6 +353,7 @@ static StartCondition start_condition(const Car_Core *car, uint8_t still, uint8_
  *           car              —— 控制对象，只用 state 判断是否停车；
  *           still            —— 轮速是否近似为零（由平台层用 speed[] 判定）；
  *           pending          —— 是否正在准备数独结果（完赛收尾期间禁止新车）；
+ *           hs               —— 本拍握手快照；
  *           road             —— 最新道路观测，NULL 表示本拍没有可用视觉帧；
  *           previous_session —— 上一场比赛绑定的视觉会话号。
  * 返回参数：发车条件枚举，只有 START_READY 才允许按 OK 发车。
@@ -294,14 +361,14 @@ static StartCondition start_condition(const Car_Core *car, uint8_t still, uint8_
  *           有效赛道帧才算 READY，防止单帧误检就发车。条件一旦中断，
  *           确认计数立即清零。
  */
-StartCondition Menu_StartCondition(MenuRoadConfirm *confirm, const Car_Core *car, uint8_t still, uint8_t pending, const CarVisionObservation *road, uint32_t previous_session)
+StartCondition Menu_StartCondition(MenuRoadConfirm *confirm, const Car_Core *car, uint8_t still, uint8_t pending, const VisionHandshake *hs, const CarVisionObservation *road, uint32_t previous_session)
 {
     const unsigned required_frames = 3U;
     StartCondition condition;
     uint16_t delta;
 
     if (confirm == NULL) return START_NO_ROAD;
-    condition = start_condition(car, still, pending, road, previous_session);
+    condition = start_condition(car, still, pending, hs, road, previous_session);
     if (condition != START_READY) {
         confirm->count = 0U;
         return condition;
@@ -354,7 +421,8 @@ MenuAction Menu_PollArmed(MenuState *m, StartCondition start)
     if (m == NULL || !m->race_armed) return MENU_IDLE;
     if (!vision_compiled() || m->depth != 2U || m->group != MENU_RACE ||
         m->item[MENU_RACE] != 0U || start == START_STOP_FIRST ||
-        start == START_MOVING || start == START_RESULT) {
+        start == START_MOVING || start == START_RESULT ||
+        start == START_VISION_ERROR) {
         m->race_armed = 0U;
         return MENU_IDLE;
     }
@@ -444,6 +512,9 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
         } else if (rpm_page) {
             unsigned base = m->candidate ? m->candidate : Menu_GetRaceRpm(m);
             m->candidate = step_rpm(base, key.id, key.type);
+        } else if (m->group == MENU_SENSORS && item == 3U) {
+            /* 故障记录页：UP 第 1 页（0..5），DOWN 第 2 页（6..8）。 */
+            m->fault_page = (key.id == KEY_UP) ? 0U : 1U;
         } else if (pid && item < 3U) {
             /* Fine taps (Ki/Kd), coarse auto-repeat for larger changes. */
             unsigned step = key.type == KEY_EVENT_REPEAT ? 10U : 1U;
@@ -503,13 +574,22 @@ MenuAction Menu_Key(MenuState *m, Key_Event_Struct key, Car_Core *car, StartCond
                 m->race_armed = 0U;
                 m->item[MENU_RACE] = 1U;
                 return MENU_LAUNCH;
-            } else if (start == START_NO_VISION || start == START_NO_ROAD ||
+            } else if (start == START_NO_VISION || start == START_NO_SESSION ||
+                       start == START_NO_FRAME || start == START_NO_ROAD ||
                        start == START_NEW_SESSION) {
                 m->race_armed = (uint8_t)!m->race_armed;
+            } else if (start == START_VISION_ERROR) {
+                /* 协议错误通常需要重启图像端或复位 F407 才会恢复，不允许预备。 */
+                m->race_armed = 0U;
+                m->feedback = FB_VISION;
             } else {
                 m->race_armed = 0U;
                 m->feedback = FB_STOP;
             }
+        } else if (m->group == MENU_SENSORS && item == 3U) {
+            /* 故障记录页：OK 清空历史，不停车、不改目标。 */
+            Car_ClearFaultLog(car);
+            m->feedback = FB_NONE;
         }
     }
     return MENU_IDLE;
@@ -558,7 +638,7 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
     const MenuState *m;
     UI_Style_Enum style = UI_STYLE_NORMAL;
     char s[LCD_LINE_BYTES] = "";
-    unsigned group, item, count, depth, start, status, phase_count, rpm;
+    unsigned group, item, count, depth, start, status, phase_count, rpm, hs_phase;
 
     if (v == NULL || row >= LCD_ROWS) {
         return;
@@ -581,11 +661,16 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
     if (start >= (unsigned)START_COUNT) {
         start = (unsigned)START_NO_ROAD;
     }
+    hs_phase = (unsigned)v->vision_phase;
+    if (hs_phase >= (unsigned)VISION_HS_COUNT) {
+        hs_phase = (unsigned)VISION_HS_OFF;
+    }
     rpm = v->race_rpm ? clamp_rpm(v->race_rpm) : Menu_GetRaceRpm(m);
 
     if (row == 0) {
+        const char *title = depth == 0U ? "智能车菜单" : s_nodes[group].name;
         style = UI_STYLE_TITLE;
-        snprintf(s,sizeof s,"%s", depth == 0U ? "智能车菜单" : s_nodes[group].name);
+        snprintf(s,sizeof s,"%s  T%07lus",title,(unsigned long)v->uptime_s);
     } else if (row == 9) {
         style = UI_STYLE_HINT;
         if (v->state != CAR_STOP) {
@@ -594,21 +679,42 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             snprintf(s,sizeof s,"OK/返回/PE10: 取消等待");
         } else if (depth < 2U) {
             snprintf(s,sizeof s,"上下移动  OK进入  返回上级");
+        } else if (group == MENU_SENSORS && item == 3U) {
+            snprintf(s,sizeof s,"OK清空 上下翻页  返回");
         } else if (group == MENU_RACE && item == 0U) {
             snprintf(s,sizeof s,"上下调RPM  OK发车  返回");
         } else if ((group == MENU_RACE && item == 3U) ||
                    (group >= MENU_LEFT_PID && item < 3U)) {
             snprintf(s,sizeof s,"上下调节  OK应用  返回放弃");
         } else if (group >= MENU_LEFT_PID && item == 3U) {
-            snprintf(s,sizeof s,"OK写入Flash  返回");
+            snprintf(s,sizeof s,"OK写入Flash  PE9返回");
         } else {
-            snprintf(s,sizeof s,"返回: 上一级");
+            snprintf(s,sizeof s,"PE9: 返回");
         }
     } else if (row == 8) {
-        style = (v->state == CAR_FAULT || v->degraded) ? UI_STYLE_WARN : UI_STYLE_HINT;
-        snprintf(s,sizeof s,"%s%s  故障 %u",v->state == CAR_STOP ? "停车" :
-                 (v->state == CAR_FAULT ? "故障" : (v->motion == CAR_MOTION_RACE ? "比赛" : "手动")),
-                 v->degraded ? " 视觉丢失" : "", (unsigned)v->fault);
+        char lim[16] = "";
+        if (v->fault_derate && CAR_FAULT_DERATE_PERCENT > 0U) {
+            snprintf(lim,sizeof lim," 限速%u%%",(unsigned)(100U - CAR_FAULT_DERATE_PERCENT));
+        }
+        if (v->fault == CAR_TIMING_FAULT) {
+            style = UI_STYLE_WARN;
+            snprintf(s,sizeof s,"故障 5  dt=%luus%s",(unsigned long)v->timing_fault_us,lim);
+        } else if (v->fault == CAR_RACE_FAULT) {
+            static const char *const reasons[] = {"", "PIT dt", "视觉丢失", "断路超限", "绕障超限", "红障超时"};
+            unsigned why = (unsigned)v->race_fault_reason;
+            style = UI_STYLE_WARN;
+            snprintf(s,sizeof s,"故障 7  %s%s",
+                     why < sizeof reasons / sizeof reasons[0] ? reasons[why] : "",lim);
+        } else if (v->state == CAR_STOP && m->race_armed) {
+            style = UI_STYLE_WARN;
+            snprintf(s,sizeof s,"待视觉握手 %3uRPM 故障%u",rpm,(unsigned)v->fault);
+        } else {
+            style = (v->state == CAR_FAULT || v->degraded) ? UI_STYLE_WARN :
+                    (v->state == CAR_RUN && v->motion == CAR_MOTION_RACE) ? UI_STYLE_GOOD : UI_STYLE_HINT;
+            snprintf(s,sizeof s,"%s%s  故障 %u%s",v->state == CAR_STOP ? "停车" :
+                     (v->state == CAR_FAULT ? "故障" : (v->motion == CAR_MOTION_RACE ? "比赛" : "手动")),
+                     v->degraded ? " 视觉丢失" : "", (unsigned)v->fault,lim);
+        }
     } else if (depth < 2U) {
         unsigned n = row-1;
         unsigned ncount = depth ? count : (unsigned)MENU_GROUPS;
@@ -623,22 +729,37 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             if (!v->vision_enabled) {
                 style = UI_STYLE_HINT;
                 snprintf(s,sizeof s,"摄像头: 已关闭");
+            } else if (v->camera_status == VISION_CAMERA_NO_FRAME) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"摄像头: 无画面");
             } else if (v->camera_status == VISION_CAMERA_STREAMING ||
                        (v->camera_status == VISION_CAMERA_UNKNOWN && v->fresh)) {
                 style = UI_STYLE_GOOD;
                 snprintf(s,sizeof s,"摄像头: 已连接");
-            } else if (v->camera_status == VISION_CAMERA_NO_FRAME) {
+            } else if (v->have_obs) {
                 style = UI_STYLE_WARN;
-                snprintf(s,sizeof s,"摄像头: 无画面");
+                snprintf(s,sizeof s,"摄像头: 数据过期");
+            } else if (v->pi_connected) {
+                style = UI_STYLE_HINT;
+                snprintf(s,sizeof s,"摄像头: 等待数据");
             } else {
                 style = UI_STYLE_WARN;
                 snprintf(s,sizeof s,"摄像头: 无法确认");
             }
         } else if (depth == 0U && row == 6U) {
-            /* 香橙派链路只看是否收到合法帧，与相机是否出图无关。 */
-            if (!v->vision_enabled) {
+            /* 链路已连接不等于已绑定会话：未握手要单独显示，避免与发车页矛盾。 */
+            if (!v->vision_enabled || hs_phase == (unsigned)VISION_HS_OFF) {
                 style = UI_STYLE_HINT;
                 snprintf(s,sizeof s,"香橙派: 已关闭");
+            } else if (hs_phase == (unsigned)VISION_HS_OFFLINE) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"香橙派: 未连接");
+            } else if (hs_phase == (unsigned)VISION_HS_ERROR) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"香橙派: 协议错误");
+            } else if (hs_phase == (unsigned)VISION_HS_WAIT_HELLO) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"香橙派: 未握手");
             } else if (v->pi_connected) {
                 style = UI_STYLE_GOOD;
                 snprintf(s,sizeof s,"香橙派: 已连接");
@@ -647,26 +768,48 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
                 snprintf(s,sizeof s,"香橙派: 未连接");
             }
         } else if (depth == 0U && row == 7U) {
+            /* 蓝牙状态右侧显示电池电压；每分钟由 Battery_Poll 更新一次，
+             * 电压与蓝牙状态共用这一行，未采样时显示占位符。 */
             style = v->bt_connected ? UI_STYLE_GOOD : UI_STYLE_WARN;
-            snprintf(s,sizeof s,"蓝牙上位机: %s", v->bt_connected ? "已连接" : "未连接");
+            if (v->battery_valid) {
+                snprintf(s,sizeof s,"蓝牙上位机: %s %4.1fV",
+                         v->bt_connected ? "已连接" : "未连接",
+                         (double)v->battery_mv / 1000.0);
+            } else {
+                snprintf(s,sizeof s,"蓝牙上位机: %s  --.-V",
+                         v->bt_connected ? "已连接" : "未连接");
+            }
         }
     } else if (row == 1) {
-        snprintf(s,sizeof s,"%s",node_name((uint8_t)(s_nodes[group].first + item)));
+        if (group == MENU_SENSORS && item == 3U) {
+            unsigned page = m->fault_page ? 1U : 0U;
+            snprintf(s,sizeof s,"故障记录 P%u/2",page + 1U);
+        } else {
+            snprintf(s,sizeof s,"%s",node_name((uint8_t)(s_nodes[group].first + item)));
+        }
     } else if (group == MENU_RACE && item == 0U) {
         if (row == 2) {
             style = (!m->race_armed && v->state == CAR_STOP) ? UI_STYLE_EDIT : UI_STYLE_NORMAL;
             snprintf(s,sizeof s,"目标 %3u rpm (%.2f m/s)",rpm,(double)TRACK_RPM_TO_MPS(rpm));
         } else if (row == 3) {
-            if (!v->vision_enabled) {
+            if (!v->vision_enabled || hs_phase == (unsigned)VISION_HS_OFF) {
                 style = UI_STYLE_WARN;
                 snprintf(s,sizeof s,"视觉: 配置已关闭");
-            } else if (!v->fresh) {
+            } else if (hs_phase == (unsigned)VISION_HS_OFFLINE) {
                 style = UI_STYLE_WARN;
-                snprintf(s,sizeof s,"%s", v->session_valid ? "视觉: 数据过期(无新帧)" :
-                         "视觉: 未开启(等--hello)");
+                snprintf(s,sizeof s,"视觉: 链路离线");
+            } else if (hs_phase == (unsigned)VISION_HS_ERROR) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉: 协议错误");
+            } else if (hs_phase == (unsigned)VISION_HS_WAIT_HELLO) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉: 等待握手");
+            } else if (hs_phase == (unsigned)VISION_HS_STALE) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉: 握手后无帧");
             } else if (start == (unsigned)START_NEW_SESSION) {
                 style = UI_STYLE_WARN;
-                snprintf(s,sizeof s,"视觉: 等待 HELLO");
+                snprintf(s,sizeof s,"视觉: 等待新会话");
             } else if (start == (unsigned)START_NO_ROAD) {
                 style = UI_STYLE_WARN;
                 if (!(v->obs.valid_mask & VISION_CURVATURE_VALID))
@@ -695,9 +838,12 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             } else if (v->vision_enabled && start == (unsigned)START_READY) {
                 style = UI_STYLE_EDIT;
                 snprintf(s,sizeof s,"OK: 立即发车 (%u rpm)",rpm);
-            } else if (v->vision_enabled && (start == (unsigned)START_NO_VISION ||
-                       start == (unsigned)START_NO_ROAD ||
-                       start == (unsigned)START_NEW_SESSION)) {
+            } else if (v->vision_enabled && hs_phase != (unsigned)VISION_HS_OFF &&
+                       (start == (unsigned)START_NO_VISION ||
+                        start == (unsigned)START_NO_SESSION ||
+                        start == (unsigned)START_NO_FRAME ||
+                        start == (unsigned)START_NO_ROAD ||
+                        start == (unsigned)START_NEW_SESSION)) {
                 style = UI_STYLE_EDIT;
                 snprintf(s,sizeof s,"OK: 预备(就绪自动开跑)");
             }
@@ -708,6 +854,9 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
             } else if (m->feedback == FB_INVALID) {
                 style = UI_STYLE_WARN;
                 snprintf(s,sizeof s,"请开启 BOARD_VISION_ENABLE=1");
+            } else if (m->feedback == FB_VISION) {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"视觉协议错误,重启图像端");
             } else if (m->race_armed) {
                 style = UI_STYLE_HINT;
                 snprintf(s,sizeof s,"电机已锁停,视觉就绪即跑");
@@ -809,6 +958,20 @@ void Menu_DrawRow(const MenuView *v, unsigned row, const uint8_t board[36], uint
                                (v->state != CAR_STOP || m->feedback == FB_STOP ? "请先停车再应用" :
                                (m->feedback == FB_INVALID ? "参数无效" : "按返回键放弃修改")));
         if (row == 7) snprintf(s,sizeof s,"调好后请进保存页写Flash");
+    } else if (group == MENU_SENSORS && item == 3U) {
+        unsigned page = m->fault_page ? 1U : 0U;
+        unsigned idx = page * 6U + (row - 2U);
+        if (idx < CAR_FAULT_CODES) {
+            const CarFaultRecord *r = &v->fault_log[idx];
+            if (r->count == 0U) {
+                style = UI_STYLE_HINT;
+                snprintf(s,sizeof s,"%u %s 未发生",idx,fault_names[idx]);
+            } else {
+                style = UI_STYLE_WARN;
+                snprintf(s,sizeof s,"%u %s x%u %lus",idx,fault_names[idx],
+                         (unsigned)r->count,(unsigned long)(r->last_ms / 1000U));
+            }
+        }
     } else if (item == 0U) {
         if (row == 2) snprintf(s,sizeof s,"     目标   实测   PWM%%");
         if (row == 3 || row == 4) {

@@ -18,7 +18,7 @@
  *     视觉快照 o（可为 NULL）+ 左/右轮本拍米数 dl/dr + 实测周期 dt
  *       -> 里程 ds、航向 dyaw（轮速差与陀螺按 15%/85% 融合）
  *       -> 赛段判定（TRACK/GAP/BYPASS/RED/FINISHED/FAULT）
- *       -> 速度规划（菜单转速作上限；曲率越大越慢；丢线降到 TRACK_HOLD_SPEED_MPS）
+ *       -> 速度规划（第一圈全速；第二圈保留原比例上限；曲率/丢线/元素/终点减速已关闭）
  *       -> drive(v, omega)：自行车模型算左右轮 rpm，并限制内轮不反转
  *
  * 参数传递约定（重要）
@@ -178,7 +178,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     float ds = 0.5f * (dl + dr);               /* 本拍底盘前进距离：两轮平均，米 */
     float dyaw = (dr - dl) / TRACK_WIDTH_M;    /* 轮速差推算的本拍航向变化，rad */
     float s, curve, speed, heading, target, error, along; /* 赛段内里程/曲率/速度/航向/目标偏移/误差 */
-    float v_target, lap_v, a_lat;              /* 菜单巡航速度/本圈上限/横向加速度上限 */
+    float v_target, lap_v;                     /* 菜单巡航速度/第二圈上限 */
     int road, measured_road, new_frame, in_window; /* 看到路/实测路/新帧/断路窗口 */
     int action_ready, yellow;                  /* 元素动作条件/黄灯候选 */
 
@@ -187,6 +187,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
 
     /* 控制周期越界（<1 ms 或 >15.1 ms）说明 5 ms 节拍已经失效，直接判赛段故障。 */
     if (!(dt >= 0.001f && dt <= 0.0151f)) {
+        r->fault_reason = TRACK_FAULT_PERIOD;
         r->phase = TRACK_SEGMENT_FAULT;
         return stop;
     }
@@ -300,7 +301,10 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
             r->phase = TRACK_SEGMENT_TRACK;                     /* 停够 5 s：回到巡线 */
             r->last_road_ms = now;
         }
-        if (now - r->entered_ms > 12000U) r->phase = TRACK_SEGMENT_FAULT;
+        if (now - r->entered_ms > 12000U) {
+            r->fault_reason = TRACK_FAULT_RED;
+            r->phase = TRACK_SEGMENT_FAULT;
+        }
         return stop;                                            /* 红灯期间始终 0/0 */
     }
 
@@ -310,6 +314,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
     if (r->phase == TRACK_SEGMENT_GAP) {
         /* 超过 1.95 m 或 12.5 s 还没出来：说明断路比预期长，判故障。 */
         if (s > 1.95f || now - r->entered_ms > 12500U) {
+            r->fault_reason = TRACK_FAULT_GAP;
             r->phase = TRACK_SEGMENT_FAULT;
             return stop;
         }
@@ -337,6 +342,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
 
         /* 12 s 未完成、航向偏差 >1.55 rad、或冲过头 0.25 m：都判故障。 */
         if (now - r->entered_ms > 12000U || fabsf(heading) > 1.55f || r->goal_m < -0.25f) {
+            r->fault_reason = TRACK_FAULT_BYPASS;
             r->phase = TRACK_SEGMENT_FAULT;
             return stop;
         }
@@ -362,6 +368,7 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
 #if TRACK_VISION_LOST_STOP_MS > 0
     if (r->degraded && r->have_curve &&
         now - r->last_road_ms >= TRACK_VISION_LOST_STOP_MS) {
+        r->fault_reason = TRACK_FAULT_VISION;
         r->phase = TRACK_SEGMENT_FAULT;
         return stop;
     }
@@ -371,28 +378,17 @@ TrackDrive Track_Step(TrackState *r, const CarVisionObservation *o, float dl, fl
      * |曲率| < 1.75 /m 认为在直道，一进弯立刻清零。 */
     r->straight_m = fabsf(r->last_measured_curve) < 1.75f ? r->straight_m + fmaxf(0,ds) : 0;
 
-    /* 菜单巡航转速换算成 v_target；第一圈直接用 v_target，第二圈更保守
-     * （至少 0.32 m/s，按 v_target 同比例收）。曲率段把横向加速度
-     * a=v²|k| 限制在 max(0.55, 0.30·v_target²)。默认 v_target≈0.55 m/s
-     * 时与改动前的公式完全一致。 */
+    /* 菜单巡航转速换算成 v_target。
+     * 按当前需求：第一圈直接全速；第二圈保留原来的比例上限。
+     * 曲率限速、视觉丢失/单边估计 0.18 m/s、低置信度/环岛/十字 0.24 m/s、
+     * 红障 0.20 m/s 和终点前包络都已移除，不再主动减速。 */
     v_target = (isfinite(r->target_rpm) && r->target_rpm > 0.0f)
              ? TRACK_RPM_TO_MPS(Track_ClampRpm(r->target_rpm)) : 0.55f;
     lap_v = (r->lap == 1) ? v_target
           : fminf(v_target, fmaxf(0.32f, v_target * (0.32f / 0.55f)));
-    a_lat = fmaxf(0.55f, 0.30f * v_target * v_target);
-    speed = fminf(lap_v, sqrtf(a_lat / (fabsf(curve) + 0.01f)));
-    /* 丢线或只拿到单边估计：都降到保持速度，单边估计不能用于高速巡线。 */
-    if (r->degraded) speed = fminf(speed, TRACK_HOLD_SPEED_MPS);
-    /* 低置信度或环岛/十字：再压到 0.24 m/s。o 为 NULL 时上面的保持速度已经兜底，
-     * 所以这里只对“有帧”的情况再加限制。 */
-    if (o && (o->confidence < 0.65f || o->element == VISION_ELEMENT_RING ||
-              o->element == VISION_ELEMENT_CROSS)) speed = fminf(speed, 0.24f);
-    if (o && o->element == VISION_ELEMENT_RED && r->lap == 2) speed = fminf(speed, 0.20f);
+    speed = lap_v;
 
-    /* 终点前的速度包络：v ≤ √(0.8·剩余里程)，保证能在终点前停住而不是冲过去。
-     * 0.0025 的下限避免 sqrt 参数为 0 时速度恒为 0。 */
-    speed = fminf(speed, sqrtf(fmaxf(0.0025f, 0.8f * (TRACK_FINISH_M - r->distance))));
-
-    /* 角速度 = 速度 × 曲率（自行车模型），再交给 drive() 变成左右轮 rpm。 */
+    /* 角速度 = 速度 × 曲率（自行车模型），再交给 drive() 变成左右轮 rpm。
+     * drive() 仍会把单轮 rpm 夹到 BOARD_RPM_LIMIT，内轮最多到 0。 */
     return drive(speed, speed * curve);
 }

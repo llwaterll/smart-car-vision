@@ -25,7 +25,10 @@
 
 ## 接线与启动
 
-香橙派 3.3 V TTL TX 接 F407 的 PB11，双方 GND 共地。使用 USART3、115200、8N1。当前链路方向为香橙派到 F407，PB10 预留作回传，现有协议无接收 ACK。板上蓝牙使用独立 USART1（PA9/PA10）。
+香橙派 3.3 V TTL TX 接 F407 的 PC11，香橙派 RX 接 F407 的 PC10，双方 GND 共地。
+使用 UART4（NEUQ 库 `UART_3`）、115200、8N1。链路是双向的：香橙派发
+HELLO/TRACK/TILE/CAMERA_STATUS，F407 每 100 ms 回一帧 36 字节 STATUS；
+反向线（PC10 -> 香橙派 RX）是自动握手的前提。板上蓝牙使用独立 USART1（PA9/PA10）。
 
 在香橙派上安装含 aruco 的 OpenCV 4 开发库、C++17 编译器和 pkg-config，进入本工程的视觉目录。将命令中的 `/dev/ttyS1` 替换为实际串口设备。
 
@@ -34,12 +37,26 @@ cd vision_inspection/vision
 bash build.sh vision
 bash build.sh test_sudoku
 ./test_sudoku
-./vision --camera 0 --config track_frontend.yml --vision-uart /dev/ttyS1 --hello
+./vision --camera 0 --config track_frontend.yml --vision-uart /dev/ttyS1 --publish-curvature
 ```
 
-先给 F407 上电并保持 STOP，再启动上述摄像头命令。摄像头输入为 640×480。每次程序启动生成非零 session；新一轮比赛先停车，再重启视觉程序带 `--hello` 建立新会话。控制端在运行和终点收尾时拒绝 HELLO，会话应在屏幕进入 STOP 后建立。
+先给 F407 上电并保持 STOP，再启动上述摄像头命令。摄像头输入为 640×480。
+vision1.4 默认自动握手：先收 F407 的 STATUS，看到
+`STOP + ALLOW_HELLO + !FINISH_PENDING` 才生成新 session 并发 HELLO，
+未绑定前每 300 ms 重试；绑定后停止 HELLO 并开始发 TYPE=1。
+新一轮比赛不需要人工重启或 `--hello`：F407 结束一轮后 `session_valid=0`，
+图像端会自动换新 session 重绑；F407 复位时 `uptime_ms` 回退也会触发重绑。
+本仓库 `vision_inspection/` 若仍是旧版，必须换成 vision1.4，或临时用
+`--legacy-hello` 人工确认 STOP 后建立一次会话；后者不具备自动重绑。
+`--publish-curvature` 是发车前提：F407 要求实测曲率有效；`--single-edge-send`
+的 bit4 单边估计永远不会被允许发车。
 
-车上选择 `Race → Start race`，出现 `Ready` 后按 PE7 确认发车。未发车时可在 `Sensors → Vision` 核对 session 和道路数据，在 `Race → Sudoku result` 检查子块。PE10 停车时向上、运行时停车，PE8 向下，PE7 确认，PE9 返回。
+车上选择 `Race → Start race`，等发车页第 3 行显示“视觉: 已开启”、
+第 4 行不再等待握手后，再按 PE7 确认发车。首页第 6 行“香橙派: 未握手”
+表示链路在线但没有绑定会话；此时按 OK 只能进入“预备”，等自动握手完成才会开跑。
+未发车时可在 `Sensors → Vision` 核对 session、OK/拒绝计数和道路数据，
+在 `Race → Sudoku result` 检查子块。PE10 停车时向上、运行时停车，PE8 向下，
+PE7 确认，PE9 返回。
 
 本机 WSL 编译产物供回归使用，香橙派部署时运行 `bash build.sh vision` 为板上 CPU 重新编译。
 
@@ -70,6 +87,7 @@ VERSION 为 1。CRC 使用 CRC-16/CCITT-FALSE，多项式 0x1021、初值 0xFFFF
 | 0 HELLO | 0 | 无负载，SEQ=0、AGE_MS=0，SESSION 非零 |
 | 1 TRACK | 16 | 道路与元素观测，字段定义见通信接口文档 |
 | 2 SUDOKU_TILE | 10 | 第 0 字节为块号 0–3，后 9 字节为格值 0–6 |
+| 3 CAMERA_STATUS | 1 | 1=有画面，0=近 1 s 无画面；不占用业务序号 |
 
 TYPE=2 整帧为 26 字节。业务 SEQ 在道路帧与子块帧之间共用，连续递增并允许 65535 回绕到 0。四个子块各发送一次需要四个不同业务序号。重新观察同一块时，发送新序号的新帧。
 
@@ -86,6 +104,12 @@ AGE_MS 为该帧采集后到发送前的处理年龄，允许 0–200 ms。主�
 
 道路帧与数独帧使用同一个 `SerialSender`。当前道路几何采用向左为正、逆时针为正，保留现有鸟瞰尺度和串口转换。协议完整定义及 Python 参考编码器见项目接口说明。[通信接口](Vision_Interface.md)
 
+反向 STATUS 帧（F407 -> 香橙派）使用相反帧头 `5A A5`、TYPE=0x01、LEN=26，
+总长 36 字节；字段、flags 和 reject 取值见通信接口文档的 STATUS 表。
+它承载 `ALLOW_HELLO / SESSION_VALID / FINISH_PENDING`、`bound_session`、
+`accepted/rejected/bad`、`obs_age_ms` 和 `uptime_ms`。图像端据此自动 HELLO、
+换会话和进入低延迟；它不是路障动作的 `eventId/ACCEPTED/COMPLETED` ACK。
+
 ## 运行入口与控制端反馈
 
 当前 `main.cpp` 已执行以下顺序。
@@ -95,7 +119,7 @@ AGE_MS 为该帧采集后到发送前的处理年龄，允许 0–200 ms。主�
 3. 对返回的每个确认块调用 `sendTile(age, index, cells)`。同一画面有多块时逐块发送，共用全局业务序号。
 4. 指定 `--output` 时记录确认结果及发送状态。
 
-绿障直接通过、黄障绕行、红障第二圈停车 5 秒的执行与圈次判断在 F407。包内 `obstacle_task` 的 Event/ACK 仍是进程内实验接口，当前串口使用 TYPE=1 颜色和几何观测驱动现有控制状态机。后续若双方改用事件握手，需要一起定义和实现双向线协议。
+绿障直接通过、黄障绕行、红障第二圈停车 5 秒的执行与圈次判断在 F407。包内 `obstacle_task` 的 Event/ACK 仍是进程内实验接口，当前串口使用 TYPE=1 颜色和几何观测驱动现有控制状态机。STATUS 反向帧只用于视觉握手和诊断，不是动作 ACK；后续若双方改用事件握手，需要另行定义 `eventId/ACCEPTED/COMPLETED` 线协议。
 
 车载 `Race → Sudoku result` 显示 TL、TR、BL、BR 是否收到，比赛状态页显示已收数量。达到练习终点后保持电机停止，连续 100 ms 确认两轮低于 2 rpm；缺块时继续等到终点触发后 1 秒，再冻结本会话题面。求解放在前台，控制中断继续运行。
 

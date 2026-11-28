@@ -6,7 +6,8 @@
  * ============================================================================
  * 模块功能：香橙派 -> STM32F407 的视觉数据接收协议与缓存。
  *
- *   外设资源：USART3（PB10/PB11，115200），只收不发。
+ *   外设资源：UART4（PC10 TX / PC11 RX，115200）。接收 HELLO/TRACK/TILE/
+ *   CAMERA_STATUS；PC10 反向发送 STATUS 帧用于自动握手与诊断。
  *
  *   线上帧格式（不可改，所有多字节整数为大端）：
  *     A5 5A | version:u8 | type:u8 | length:u16 | seq:u16 | session:u32
@@ -94,6 +95,23 @@ enum
 };
 
 /*
+ * 最近一次业务拒绝原因，取值与 STATUS 帧 reject 字段一致。
+ * 仅用于诊断，不改变接收行为。
+ */
+enum
+{
+    VISION_REJECT_NONE = 0,          /* 无拒绝 */
+    VISION_REJECT_VERSION = 1,       /* 版本/会话为 0 */
+    VISION_REJECT_HELLO = 2,         /* HELLO 不被允许 */
+    VISION_REJECT_SESSION = 3,       /* 会话不匹配 */
+    VISION_REJECT_AGE = 4,           /* 年龄超限 */
+    VISION_REJECT_SEQUENCE = 5,      /* 序号重复/旧帧 */
+    VISION_REJECT_PAYLOAD = 6,       /* 字段非法 */
+    VISION_REJECT_TYPE_LENGTH = 7,   /* 类型/长度错误 */
+    VISION_REJECT_TILE = 8           /* 数独块非法 */
+};
+
+/*
  * 道路观测快照。
  */
 typedef struct
@@ -150,6 +168,7 @@ typedef struct
     uint32_t accepted_frames;  /* 已接受帧数，含 HELLO */
     uint32_t bad_frames;       /* 长度越界或 CRC 错误的帧数 */
     uint32_t rejected_frames;  /* CRC 正确但业务字段不合法的帧数 */
+    uint8_t last_reject;       /* 最近一次业务拒绝原因，取值见 VISION_REJECT_* */
     uint32_t camera_status_ms; /* 最近一次收到摄像头状态帧的时间 */
     CarVisionCameraStatus camera_status; /* 最近一次摄像头状态 */
     /* 香橙派链路：任一 CRC 通过帧都刷新时间戳，用于区分“串口没数据”

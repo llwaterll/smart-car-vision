@@ -191,6 +191,7 @@ int main(void)
     command(&c,2,0,0); command(&c,1,0,0); wheels(&c,80,80);
     Car_TickDt(&c,0,0,20000);
     assert(c.state==CAR_FAULT && c.fault==CAR_TIMING_FAULT && c.output[0]==0);
+    assert(c.timing_fault_us==20000U);
     command(&c,2,0,0); command(&c,1,0,0); wheels(&c,80,80);
     { int i; for(i=0;i<50;i++)Car_TickDt(&c,0,0,10000); }
     assert(c.state==CAR_FAULT && c.fault==CAR_LINK_FAULT);

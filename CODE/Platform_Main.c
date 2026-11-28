@@ -23,6 +23,7 @@
  *     poll_params() 写 Flash（阻塞，必须停车后做）
  *     Vofa_Poll()   缓慢发送遥测
  *     Gyro_Poll()   每 10 ms 读一次陀螺
+ *     Battery_Poll() 每 60 s 读一次电池电压
  *     poll_menu()   每 120 ms 画一行菜单
  *
  *   为什么这样分：
@@ -45,6 +46,7 @@
  */
 #include "NEUQ_lib_include.h"
 #include "Platform_Main.h"
+#include "Proto_VisionStatus.h"
 #include <math.h>
 #include <string.h>
 
@@ -87,6 +89,16 @@ static uint8_t finish_timing, finish_tile_mask;
 
 /* 整车是否静止（停车且双轮转速近似为零），陀螺零偏标定用。 */
 static volatile uint8_t chassis_still;
+
+#if BOARD_VISION_ENABLE
+/* F407 -> Pi STATUS 帧调度状态：周期发送 + 状态变化立即发送。 */
+static uint16_t status_seq;
+static uint32_t status_last_ms;
+static uint8_t status_valid;
+static uint8_t status_prev_state;
+static uint8_t status_prev_flags;
+static uint32_t status_prev_session;
+#endif
 
 /* 平台层请求标志：写参数、时基重挂、菜单整屏重画。 */
 static volatile uint8_t params_pending, params_rebase, menu_refresh;
@@ -226,6 +238,130 @@ static void finish_tick(uint32_t now)
     finish_ready = 1;
 }
 
+#if BOARD_VISION_ENABLE
+/*
+ * 函数名称：vision_status_tick
+ * 函数功能：组装并调度 F407 -> Pi 的 STATUS 帧。
+ * 参数说明：now —— 当前毫秒时间。
+ * 返回参数：无。
+ * 备注信息：100 ms 周期；state/flags/bound_session 变化立即发送，
+ *           但两次立即发送至少间隔 20 ms。发送走非阻塞 UART 接口，
+ *           忙时丢帧，不影响控制节拍。
+ */
+static void vision_status_tick(uint32_t now)
+{
+    VisionStatus s;
+    CarVisionObservation obs;
+    uint8_t frame[VISION_STATUS_FRAME_SIZE];
+    uint8_t flags = 0U;
+    uint8_t state = car.state;
+    uint32_t session = vision.session_valid ? vision.session : 0U;
+    uint8_t changed;
+
+    if (state == CAR_STOP && !finish_pending)
+    {
+        flags |= VISION_STATUS_FLAG_ALLOW_HELLO;
+    }
+    if (vision.session_valid)
+    {
+        flags |= VISION_STATUS_FLAG_SESSION_VALID;
+    }
+    if (finish_pending)
+    {
+        flags |= VISION_STATUS_FLAG_FINISH_PENDING;
+    }
+    if (Uart_VisionFault())
+    {
+        flags |= VISION_STATUS_FLAG_UART_FAULT;
+    }
+    if (CarVision_GetObservation(&vision, now, &obs))
+    {
+        flags |= VISION_STATUS_FLAG_OBS_FRESH;
+    }
+    if (car.motion == CAR_MOTION_RACE)
+    {
+        flags |= VISION_STATUS_FLAG_AUTONOMOUS;
+    }
+    if (CarVision_LinkAlive(&vision, now))
+    {
+        flags |= VISION_STATUS_FLAG_LINK_ALIVE;
+    }
+
+    changed = (uint8_t)(!status_valid || state != status_prev_state ||
+                        flags != status_prev_flags ||
+                        session != status_prev_session);
+    if (!changed && (uint32_t)(now - status_last_ms) < VISION_STATUS_PERIOD_MS)
+    {
+        return;
+    }
+    /* 最小发送间隔对周期帧和变化帧同时生效，避免两帧靠得过近。 */
+    if (status_valid &&
+        (uint32_t)(now - status_last_ms) < VISION_STATUS_MIN_GAP_MS)
+    {
+        return;
+    }
+
+    s.seq = status_seq;
+    s.state = state;
+    s.fault = car.fault;
+    s.flags = flags;
+    s.reject = vision.last_reject;
+    s.bound_session = session;
+    s.accepted = vision.accepted_frames;
+    s.rejected = vision.rejected_frames;
+    s.bad = vision.bad_frames;
+    if (vision.have_observation)
+    {
+        uint32_t age = (uint32_t)(now - vision.observation.received_ms) +
+                       vision.observation.processing_age_ms;
+        s.obs_age_ms = (age > 0xFFFFU) ? 0xFFFFU : (uint16_t)age;
+    }
+    else
+    {
+        s.obs_age_ms = 0xFFFFU;
+    }
+    s.uptime_ms = now;
+
+    if (VisionStatus_Encode(&s, frame) == VISION_STATUS_FRAME_SIZE &&
+        Uart_SendVisionStatus(frame, VISION_STATUS_FRAME_SIZE))
+    {
+        status_seq++;   /* 只有真正启动发送才推进序号 */
+    }
+
+    status_last_ms = now;
+    status_prev_state = state;
+    status_prev_flags = flags;
+    status_prev_session = session;
+    status_valid = 1U;
+}
+#endif
+
+/*
+ * 函数名称：vision_handshake_snapshot
+ * 函数功能：把视觉链路的会话、新鲜帧和最近拒绝原因合成握手快照。
+ * 参数说明：hs    —— 输出快照，不能为空；
+ *           now   —— 当前毫秒时间；
+ *           fresh —— 本拍是否有 200 ms 内的新鲜 TYPE=1。
+ * 返回参数：无。
+ * 备注信息：只在同一执行上下文读取 vision；调用方负责把它传给
+ *           Menu_StartCondition 和 MenuView，避免菜单与发车条件两处判断漂移。
+ */
+static void vision_handshake_snapshot(VisionHandshake *hs, uint32_t now, uint8_t fresh)
+{
+    if (hs == NULL)
+    {
+        return;
+    }
+    hs->enabled = (uint8_t)BOARD_VISION_ENABLE;
+    hs->link_alive = (uint8_t)(!Uart_VisionFault() &&
+        CarVision_LinkAlive(&vision, now));
+    hs->session_valid = vision.session_valid;
+    hs->fresh = fresh;
+    hs->reject = vision.last_reject;
+    hs->phase = VisionHs_Phase(hs->enabled, hs->link_alive, hs->session_valid,
+                               hs->fresh, hs->reject);
+}
+
 /*
  * 函数名称：poll_menu
  * 函数功能：主循环里按行刷新菜单，每 MENU_REFRESH_MS 画一行。
@@ -269,6 +405,7 @@ static void poll_menu(void)
     {
         unsigned i;
         const Car_PidInc_Struct *pid;
+        VisionHandshake hs;
 
         if (now - last < MENU_REFRESH_MS)
         {
@@ -291,6 +428,11 @@ static void poll_menu(void)
         view.state = car.state;
         view.motion = car.motion;
         view.fault = car.fault;
+        view.fault_derate = (uint8_t)(car.fault_derate_us > 0U);
+        memcpy(view.fault_log, car.fault_log, sizeof view.fault_log);
+        view.uptime_s = now / 1000U;
+        view.timing_fault_us = car.timing_fault_us;
+        view.race_fault_reason = track.fault_reason;
         view.phase = (uint8_t)track.phase;
         view.degraded = (car.motion == CAR_MOTION_RACE) ? track.degraded : 0;
         view.lap = track.lap;
@@ -312,12 +454,18 @@ static void poll_menu(void)
         view.vision_rejected = vision.rejected_frames;
         view.vision_enabled = (uint8_t)BOARD_VISION_ENABLE;
         view.session_valid = vision.session_valid;
+        view.have_obs = vision.have_observation;
+        vision_handshake_snapshot(&hs, now, view.fresh);
+        view.vision_phase = (uint8_t)hs.phase;
+        view.vision_reject = vision.last_reject;
         view.camera_status = CarVision_GetCameraStatus(&vision, now);
         /* 香橙派链路只看是否收到合法帧，与相机是否出图独立。 */
         view.pi_connected = (uint8_t)(!Uart_VisionFault() &&
             CarVision_LinkAlive(&vision, now));
         view.bt_connected = (uint8_t)(bt_last_ms != 0U &&
             (uint32_t)(now - bt_last_ms) <= BT_STATUS_TIMEOUT_MS);
+        view.battery_mv = Battery_Millivolts();
+        view.battery_valid = Battery_Valid();
         view.tile_mask = (result_status == SUDOKU_COLLECTING || result_status == SUDOKU_WAITING) ?
             copy_tiles(NULL, now) : finish_tile_mask;
         shown_result = result_status;
@@ -348,6 +496,7 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
     static unsigned scan_ms, stop_release_ms;
     Key_Event_Struct key;
     CarVisionObservation o;
+    VisionHandshake hs;
     uint32_t now = HAL_GetTick();
     uint8_t fresh = CarVision_GetObservation(&vision, now, &o);
     uint8_t still = (fabsf(car.speed[0]) < 2 && fabsf(car.speed[1]) < 2);
@@ -397,7 +546,8 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
         memset(&launch_road, 0, sizeof launch_road);
     }
 
-    menu_start = Menu_StartCondition(&launch_road, &car, still, finish_pending,
+    vision_handshake_snapshot(&hs, now, (uint8_t)(fresh && !Uart_VisionFault()));
+    menu_start = Menu_StartCondition(&launch_road, &car, still, finish_pending, &hs,
                                      (fresh && !Uart_VisionFault()) ? &o : NULL,
                                      race_session);
 
@@ -452,6 +602,9 @@ static void track_tick(int32_t l, int32_t r, uint32_t dt_us)
         if (track.phase == TRACK_SEGMENT_FAULT)
         {
             Car_Fault(&car, CAR_RACE_FAULT);
+            /* 记录模式下保护故障不停车；但赛段 FAULT 是 Track_Fsm 自己的
+             * 任务级安全停车，仍写入 0 目标，避免保持上一拍目标继续跑。 */
+            Car_RaceWheels(&car, cmd.rpm);
         }
         else if (track.phase == TRACK_SEGMENT_FINISHED)
         {
@@ -625,6 +778,7 @@ void Car_PIT_Handler(void)
     uint32_t dt_us;                 /* 实际控制周期，微秒 */
     int32_t l;                      /* 左轮本拍计数增量 */
     int32_t r;                      /* 右轮本拍计数增量 */
+    VisionHandshake hs;             /* 本拍视觉握手快照 */
 
     dt_us = Clock_PeriodUs();
 
@@ -666,7 +820,17 @@ void Car_PIT_Handler(void)
     }
 
     /* 用实测周期更新控制器，并把双轮输出应用到电机。 */
-    track_tick(l, r, dt_us);
+    if (dt_us >= TASK_MIN_CONTROL_US && dt_us <= TASK_MAX_CONTROL_US)
+    {
+        track_tick(l, r, dt_us);
+    }
+    else
+    {
+        /* 控制周期异常：本拍不受理发车/菜单，并由 Car_TickDt 锁存故障 5。
+         * 与上位机库保持一致，避免坏周期里先受理一次发车再进故障。 */
+        Menu_Disarm(&menu);
+        Key_ClearEvents();
+    }
     Car_TickDt(&car, l, r, dt_us);
     Motor_Apply(0, car.output[0]);
     Motor_Apply(1, car.output[1]);
@@ -698,8 +862,10 @@ void Car_PIT_Handler(void)
 
             /* 每接受一帧就推进一次发车确认，避免一拍拍内多帧被漏计。 */
             road_fresh = CarVision_GetObservation(&vision, now, &road);
+            vision_handshake_snapshot(&hs, now,
+                                      (uint8_t)(road_fresh && !Uart_VisionFault()));
             menu_start = Menu_StartCondition(&launch_road, &car, chassis_still,
-                                             finish_pending,
+                                             finish_pending, &hs,
                                              (road_fresh && !Uart_VisionFault()) ? &road : NULL,
                                              race_session);
         }
@@ -713,6 +879,11 @@ void Car_PIT_Handler(void)
     }
 
     finish_tick(HAL_GetTick());
+
+#if BOARD_VISION_ENABLE
+    /* F407 -> Pi 状态帧：放在视觉解析之后，保证本拍统计已更新。 */
+    vision_status_tick(HAL_GetTick());
+#endif
 
     /* 打包二进制遥测：快帧 100 Hz、慢帧 20 Hz。 */
     if (++telemetry_fast >= BOARD_TELEMETRY_FAST_TICKS)
@@ -836,7 +1007,9 @@ void Car_Main(void)
 
 #if BOARD_VISION_ENABLE
     NEUQ_Uart_init((UART_DEV_ENUM)BOARD_UART_VIS_INDEX, BOARD_UART_VIS_BAUD);
-    NEUQ_Uart_Enable_RX_Interrupt((UART_DEV_ENUM)BOARD_UART_VIS_INDEX, 4);
+    /* UART4 必须能抢占 5 ms 控制中断：115200 下一个字节约 86.8 us，
+     * 控制中断执行期间若阻塞 UART4，单字节接收寄存器会 ORE 溢出。 */
+    NEUQ_Uart_Enable_RX_Interrupt((UART_DEV_ENUM)BOARD_UART_VIS_INDEX, 0);
 #endif
 
     NEUQ_GPIO_init(BOARD_HEARTBEAT_LED_PIN, GPIO_Mode_Output_PushPull, GPIO_Low);
@@ -844,6 +1017,7 @@ void Car_Main(void)
 
     Lcd_Init();
     Gyro_Init();
+    Battery_Init();                                  /* 电池电压 ADC1_IN10 / PC0 */
 
     /* 慢速初始化做完，才开始接收蓝牙命令。 */
     NEUQ_Uart_init((UART_DEV_ENUM)BOARD_UART_BT_INDEX, BOARD_UART_BT_BAUD);
@@ -854,6 +1028,11 @@ void Car_Main(void)
     Clock_Init();
 
     NEUQ_PIT_init_ms(PIT_CH1, BOARD_PERIOD_MS);
+#if BOARD_VISION_ENABLE
+    /* 库把 TIM6 设为优先级 0；这里降到 1，让 UART4 视觉接收（0）能抢占，
+     * 避免控制中断执行期间漏收视觉字节。蓝牙仍是 3，不抢占控制中断。 */
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
+#endif
     iwdg_start();                                    /* 初始化完成后再启动 4 s 看门狗 */
 
     /* 控制和按键由 PIT 驱动，慢速外设分次在主循环推进。 */
@@ -862,6 +1041,7 @@ void Car_Main(void)
         poll_params();
         Vofa_Poll();
         Gyro_Poll(chassis_still);
+        Battery_Poll(HAL_GetTick());                 /* 每 60 s 采样一次电池电压 */
         Lcd_Poll(HAL_GetTick());                     /* 周期整屏重画 / SPI 超时后重初始化 */
         poll_menu();
         iwdg_feed();                                 /* 只有主循环完整走完一轮才喂狗 */

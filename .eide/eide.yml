@@ -187,6 +187,8 @@ virtualFolder:
         - path: CODE/Drv_Lcd_FontZh.h
         - path: CODE/Drv_Gyro.c
         - path: CODE/Drv_Gyro.h
+        - path: CODE/Drv_Battery.c
+        - path: CODE/Drv_Battery.h
         - path: CODE/Drv_Clock.c
         - path: CODE/Drv_Clock.h
         - path: CODE/Drv_Uart.c
@@ -195,6 +197,8 @@ virtualFolder:
         - path: CODE/Proto_Bluetooth.h
         - path: CODE/Proto_Vision.c
         - path: CODE/Proto_Vision.h
+        - path: CODE/Proto_VisionStatus.c
+        - path: CODE/Proto_VisionStatus.h
         - path: CODE/Proto_Vofa.c
         - path: CODE/Proto_Vofa.h
         - path: CODE/Pid.c

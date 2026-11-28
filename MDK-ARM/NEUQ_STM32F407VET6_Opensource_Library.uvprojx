@@ -1105,6 +1105,16 @@
             <FilePath>../CODE/Drv_Gyro.h</FilePath>
             </File>
             <File>
+            <FileName>Drv_Battery.c</FileName>
+            <FileType>1</FileType>
+            <FilePath>../CODE/Drv_Battery.c</FilePath>
+            </File>
+            <File>
+            <FileName>Drv_Battery.h</FileName>
+            <FileType>5</FileType>
+            <FilePath>../CODE/Drv_Battery.h</FilePath>
+            </File>
+            <File>
             <FileName>Drv_Clock.c</FileName>
             <FileType>1</FileType>
             <FilePath>../CODE/Drv_Clock.c</FilePath>
@@ -1143,6 +1153,16 @@
             <FileName>Proto_Vision.h</FileName>
             <FileType>5</FileType>
             <FilePath>../CODE/Proto_Vision.h</FilePath>
+            </File>
+            <File>
+            <FileName>Proto_VisionStatus.c</FileName>
+            <FileType>1</FileType>
+            <FilePath>../CODE/Proto_VisionStatus.c</FilePath>
+            </File>
+            <File>
+            <FileName>Proto_VisionStatus.h</FileName>
+            <FileType>5</FileType>
+            <FilePath>../CODE/Proto_VisionStatus.h</FilePath>
             </File>
             <File>
             <FileName>Proto_Vofa.c</FileName>

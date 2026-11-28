@@ -8,8 +8,10 @@
  * 模块功能：整车控制核心。文件内分三层，对外只暴露少量入口：
  *
  *   第一层 整车状态机  Car_Init / Car_LocalStop / Car_Fault / Car_StartRace
- *           STOP（可改 PID、可发车）-> RUN（接受目标）-> FAULT（锁存故障，
- *           必须先 STOP 清除再 ARM）。故障码只记录第一次触发的原因。
+ *           STOP（可改 PID、可发车）-> RUN（接受目标）。
+ *           默认 CAR_FAULT_STOP_ENABLE=0：故障只按码记录，不停车、不锁存；
+ *           =1 时保留传统 FAULT（锁存第一个故障，必须先 STOP 清除再 ARM）。
+ *           故障记录通过 Car_ClearFaultLog() 或菜单故障页清除，不影响电机目标。
  *
  *   第二层 运动目标    Car_SetPid / Car_SetOpenLoop / Car_RaceWheels
  *           所有目标来源（蓝牙命令 3/6、菜单、巡线状态机）都只写 target，
@@ -104,7 +106,7 @@ enum
     CAR_MOTION_RACE       /* 巡线状态机自动发车 */
 };
 
-/* 故障码，枚举值同时用于遥测，顺序不可改；只保留第一次触发的原因。 */
+/* 故障码，枚举值同时用于遥测，顺序不可改。 */
 enum
 {
     CAR_NO_FAULT,         /* 0：无故障 */
@@ -117,6 +119,17 @@ enum
     CAR_RACE_FAULT,       /* 7：比赛观测失效或动作越界 */
     CAR_OVERSPEED_FAULT   /* 8：测得转速持续过高 */
 };
+
+/* 故障记录：每个故障码独立累计；持续条件只在边沿计一次，清除后再次出现会再加一次。 */
+#define CAR_FAULT_CODES       9U   /* 故障码 0..8 的记录槽数 */
+#define CAR_FAULT_HOLD_TICKS  40U  /* 同一条件持续时不重复计次的保持拍数（40×5ms=200ms） */
+
+typedef struct
+{
+    uint16_t count;      /* 分离的故障段数，饱和到 0xFFFF */
+    uint32_t first_ms;   /* 第一次发生的控制运行时间，毫秒 */
+    uint32_t last_ms;    /* 最近一次观察到该故障的时间，毫秒 */
+} CarFaultRecord;
 
 /* 整车控制对象：目标、实测、PID、保护计时与蓝牙解析上下文。 */
 typedef struct
@@ -166,8 +179,15 @@ typedef struct
     /* ---------- 状态与协议字段 ---------- */
     uint8_t state;            /* 整车状态，取值见 CAR_STOP/CAR_RUN/CAR_FAULT */
     uint8_t motion;           /* 目标来源，取值见 CAR_MOTION_* */
-    uint8_t fault;            /* 故障码，取值见 CAR_*_FAULT */
+    uint8_t fault;            /* 最近一次故障码，取值见 CAR_*_FAULT */
+    uint32_t timing_fault_us; /* 首次触发故障 5 的实测控制周期 */
     uint8_t result;           /* 最近一条命令或帧的处理结果 */
+
+    /* ---------- 故障记录（记录模式下不停车） ---------- */
+    CarFaultRecord fault_log[CAR_FAULT_CODES]; /* 每个故障码独立计数与时间 */
+    uint8_t fault_hold[CAR_FAULT_CODES];       /* 边沿保持计数，持续条件不重复计次 */
+    uint32_t fault_derate_us;                  /* 故障降额剩余时间，>0 时参考轮速降到 (100-10)% */
+    uint32_t uptime_ms;                        /* 控制运行时间，故障时间戳 */
 
     /* 蓝牙解析上下文（由 Proto_Bluetooth.c 维护）。 */
     uint8_t parse_state;      /* 解析状态机当前状态 0~5 */
@@ -278,12 +298,25 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count, uint32_t d
 
 /*
  * 函数名称：Car_Fault
- * 函数功能：锁存故障并清零目标、参考与输出。
+ * 函数功能：记录一次故障。
  * 参数说明：c —— 控制对象；fault —— 非零的 CAR_*_FAULT 故障码。
  * 返回参数：无。
- * 备注信息：重复调用不覆盖第一个故障码；保留实测转速。
+ * 备注信息：CAR_FAULT_STOP_ENABLE=0 时只记录、不改变目标/状态/输出；
+ *           =1 时保留传统行为：锁存第一个故障、清输出并进入 CAR_FAULT。
+ *           每个故障码独立记录 count/first_ms/last_ms；同一条件持续 200 ms
+ *           内只算一次，条件消失后再次出现会再计一次。
  */
 void Car_Fault(Car_Core *c, uint8_t fault);
+
+/*
+ * 函数名称：Car_ClearFaultLog
+ * 函数功能：清空故障记录和最近故障码，不停车、不改目标。
+ * 参数说明：c —— 控制对象。
+ * 返回参数：无。
+ * 备注信息：供菜单“故障记录”页的 OK 键调用；PE10 停车只清最近故障码，
+ *           不清历史记录。
+ */
+void Car_ClearFaultLog(Car_Core *c);
 
 /*
  * 函数名称：Car_ClearMotion

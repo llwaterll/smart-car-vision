@@ -336,8 +336,8 @@ void Car_Init(Car_Core *c)
 
     for (i = 0; i < 2; i++)
     {
-        /* 内环：增量式速度 PID，默认增益和输出限幅来自 Board_Config.h（及各模块头），
-         * 停车时可由蓝牙命令 4 或板端菜单修改。 */
+        /* 内环：增量式速度 PID，默认增益在 Pid.h（PID_DEFAULT_*），
+         * 输出限幅在 Board_Config.h；停车时可由蓝牙命令 4 或板端菜单修改。 */
         Car_PidInc_init(&c->pid_speed[i],
                         PID_DEFAULT_KP,
                         PID_DEFAULT_KI,
@@ -408,7 +408,7 @@ void Car_Init(Car_Core *c)
 
 /*
  * 函数名称：Car_Fault
- * 函数功能：锁存故障并立即停车。
+ * 函数功能：记录一次故障；按 CAR_FAULT_STOP_ENABLE 决定是否停车。
  * 参数说明：c     —— 控制对象；
  *           fault —— 调用者传入的 CAR_*_FAULT 故障码。
  * 返回参数：无。
@@ -417,36 +417,93 @@ void Car_Init(Car_Core *c)
  *     {
  *         Car_Fault(&car, CAR_TIMING_FAULT);
  *     }
- * 备注信息：重复调用不会覆盖第一次记录的故障原因；
- *           清零输出只代表控制量为 0，不代表车轮已经物理停止。
+ * 备注信息：每个故障码有独立的 count/first_ms/last_ms；同一条件持续期间
+ *           由 fault_hold 保持，不会每拍累加。记录模式下不清目标、不改状态、
+ *           不清输出；传统模式保留原来的锁存停车行为。
  */
 void Car_Fault(Car_Core *c, uint8_t fault)
 {
+    if (c == NULL)
+    {
+        return;
+    }
+
+    if (fault < CAR_FAULT_CODES)
+    {
+        CarFaultRecord *r = &c->fault_log[fault];
+
+        if (c->fault_hold[fault] == 0U)
+        {
+            if (r->count == 0U)
+            {
+                r->first_ms = c->uptime_ms;
+            }
+            if (r->count < 0xFFFFU)
+            {
+                r->count++;
+            }
+        }
+        c->fault_hold[fault] = (uint8_t)CAR_FAULT_HOLD_TICKS;
+        r->last_ms = c->uptime_ms;
+    }
+
+    /* 记录模式下的故障降额：当前 PERCENT=0，不降速；改为 10 可恢复。 */
+#if CAR_FAULT_DERATE_PERCENT > 0U
+    c->fault_derate_us = CAR_FAULT_DERATE_HOLD_MS * 1000U;
+#else
+    c->fault_derate_us = 0U;
+#endif
+
+#if CAR_FAULT_STOP_ENABLE
     c->motion = CAR_MOTION_IDLE;
-    if (c->state != CAR_FAULT)    /* 只记录第一次故障原因 */
+    if (c->state != CAR_FAULT)    /* 传统模式只记录第一次故障原因 */
     {
         c->fault = fault;
     }
-
     reset_motion(c);              /* 清空目标、参考和输出 */
     c->state = CAR_FAULT;         /* 进入故障状态 */
     c->parse_state = 0;           /* 丢弃未收完的蓝牙帧 */
+#else
+    c->fault = fault;             /* 记录模式：只更新最近故障码，继续运行 */
+#endif
+}
+
+/*
+ * 函数名称：Car_ClearFaultLog
+ * 函数功能：清空故障记录与最近故障码，不停车、不改目标。
+ * 参数说明：c —— 控制对象。
+ * 返回参数：无。
+ * 备注信息：只清诊断数据；电机目标、状态和输出保持不变。
+ */
+void Car_ClearFaultLog(Car_Core *c)
+{
+    if (c == NULL)
+    {
+        return;
+    }
+    memset(c->fault_log, 0, sizeof(c->fault_log));
+    memset(c->fault_hold, 0, sizeof(c->fault_hold));
+    c->fault_derate_us = 0U;
+    c->fault = CAR_NO_FAULT;
 }
 
 /*
  * 函数名称：Car_LocalStop
- * 函数功能：本地停车：清目标/参考/输出、清故障码，回到 STOP。
+ * 函数功能：本地停车：清目标/参考/输出、清最近故障码，回到 STOP。
  * 参数说明：c —— 控制对象。
  * 返回参数：无。
- * 备注信息：与 Car_Fault 的区别——本函数清故障码，是“允许重新发车”的入口；
+ * 备注信息：与 Car_Fault 的区别——本函数清最近故障码，是“允许重新发车”的入口；
  *           motion 一并回到 IDLE，之后蓝牙命令 3 或菜单发车才能重新取得目标来源。
  *           link_us 清零，避免下次启动时立刻被通信看门狗判超时。
+ *           故障历史 fault_log 不清，由菜单“故障记录”页的 OK 单独清除。
  */
 void Car_LocalStop(Car_Core *c)
 {
     reset_motion(c);
     c->state = CAR_STOP;
     c->fault = c->parse_state = 0;
+    memset(c->fault_hold, 0, sizeof(c->fault_hold));
+    c->fault_derate_us = 0U;
     c->motion = CAR_MOTION_IDLE;
     c->link_us = 0;
 }
@@ -703,7 +760,9 @@ void Car_RaceWheels(Car_Core *c, const float rpm[2])
  *     Car_TickDt(&car, left_delta, right_delta, dt_us);
  *     output(0, car.output[0]);
  *     output(1, car.output[1]);
- * 备注信息：周期越界、通信超时、堵转或方向异常都会触发故障并停车。
+ * 备注信息：周期越界、通信超时、堵转或方向异常都会触发故障记录；
+ *           默认记录模式下不停车，只把参考轮速最多下调
+ *           CAR_FAULT_DERATE_PERCENT%，保持 CAR_FAULT_DERATE_HOLD_MS。
  *           本函数不操作 GPIO/PWM，硬件层负责把 output 应用到电机。
  */
 void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count, uint32_t dt_us)
@@ -711,12 +770,37 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count, uint32_t d
     int32_t counts[2];                            /* 双轮编码器增量，0 左轮 / 1 右轮 */
     unsigned i;                                   /* 双轮循环下标 */
     float dt;                                     /* 实际控制周期，单位秒 */
+    float fault_scale;                            /* 故障降额系数，最低 1-10% */
 
     dt = (float)dt_us * 0.000001f;                /* 微秒换算为秒 */
+
+    /* 记录模式下的故障时间戳与“同一条件不重复计次”保持计数。 */
+    c->uptime_ms += (uint32_t)(dt_us / 1000U);
+    for (i = 0U; i < CAR_FAULT_CODES; i++)
+    {
+        if (c->fault_hold[i] != 0U)
+        {
+            c->fault_hold[i]--;
+        }
+    }
+
+    /* 故障降额计时：多个故障只保持同一个 90% 上限，不叠加。 */
+    if (c->fault_derate_us > dt_us)
+    {
+        c->fault_derate_us -= dt_us;
+    }
+    else
+    {
+        c->fault_derate_us = 0U;
+    }
+    fault_scale = (c->fault_derate_us > 0U) ?
+        (1.0f - (float)CAR_FAULT_DERATE_PERCENT / 100.0f) : 1.0f;
 
     /* 周期越界时停止控制，避免用异常采样间隔计算速度和积分。 */
     if (dt_us < TASK_MIN_CONTROL_US || dt_us > TASK_MAX_CONTROL_US)
     {
+        /* 只记录第一次故障 5 的周期，供菜单显示“故障 5 dt=...”。 */
+        if (c->state != CAR_FAULT) c->timing_fault_us = dt_us;
         Car_Fault(c, CAR_TIMING_FAULT);
         return;
     }
@@ -852,7 +936,8 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count, uint32_t d
             continue;
         }
 
-        c->reference[i] = c->target[i];           /* 本拍参考 = 目标（参考规划器已删除） */
+        /* 本拍参考 = 目标；故障降额期间统一乘 0.9（或配置值），不叠加。 */
+        c->reference[i] = c->target[i] * fault_scale;
 
         /*
          * 开环 PWM 测试（蓝牙命令 6）：直接给执行器，绕过外环/内环。
@@ -936,9 +1021,11 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count, uint32_t d
 #endif
         c->output_last[i] = c->output[i];
 
-        /* 任一环内部检测到数值异常都会锁存 fault，这里立即转入整车故障。 */
+        /* 任一环内部检测到数值异常都会锁存 fault；记录模式下也要清掉
+         * 该轮可能为 NaN/Inf 的输出，避免继续驱动，但不停另一轮。 */
         if (c->pid_speed[i].fault || c->pid_position[i].fault)
         {
+            c->output[i] = 0.0f;
             c->output_last[i] = 0.0f;
             Car_Fault(c, CAR_CONTROLLER_FAULT);
             continue;

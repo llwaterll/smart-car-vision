@@ -134,9 +134,10 @@ class Console:
         self.reader = TelemetryReader()
         self.last_rx = 0
         self.next_tx = 0
+        self.next_hb = 0
         self.sample = None
         self.target = [0, 0]
-        self.local_gains = [[8.0, 0.3, 0.0], [8.0, 0.3, 0.0]]
+        self.local_gains = [[14.0, 1.0, 0.0], [14.0, 1.0, 0.0]]
         self.log_file = None
         root.title('NEUQ 双电机蓝牙调试 · 前万向轮底盘')
         root.geometry('780x610')
@@ -186,7 +187,7 @@ class Console:
         for wheel, label in enumerate(('左轮', '右轮')):
             ttk.Label(tuning, text=label).grid(row=wheel, column=0, padx=6)
             entries = []
-            for col, (name, default) in enumerate(zip(('Kp', 'Ki', 'Kd'), ('8', '0.3', '0'))):
+            for col, (name, default) in enumerate(zip(('Kp', 'Ki', 'Kd'), ('14', '1', '0'))):
                 ttk.Label(tuning, text=name).grid(row=wheel, column=col * 2 + 1)
                 entry = ttk.Entry(tuning, width=8)
                 entry.insert(0, default)
@@ -374,6 +375,10 @@ class Console:
                     # Repeat wheel commands themselves act as the 100ms heartbeat.
                     self.drive()
                     self.next_tx = now + 0.1
+                elif not self.armed and not self.pending_arm and now >= self.next_hb:
+                    # 空闲时 1 Hz 心跳：让 F407 菜单区分“已连接未使能”和“真的断开”。
+                    self.send(packet(5))
+                    self.next_hb = now + 1.0
             except Exception as exc:
                 self.disconnect(send_stop=False)
                 self.status.set(f'接收失败：{exc}')

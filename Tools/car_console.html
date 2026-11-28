@@ -301,14 +301,14 @@ footer code{font:11px var(--mono);background:#eaf0f6;border-radius:4px;padding:2
       <div class="pid-panel" id="pidInnerPanel" role="tabpanel" aria-labelledby="tabInner">
         <div class="pid-wheel">
           <div class="pid-wheel-head"><b>左轮</b><span>增量式 · 输出 PWM</span><button class="btn small" data-pid="0">写入</button></div>
-          <div class="pid-row"><label for="kp0">Kp</label><input type="number" id="kp0" min="0" max="655.35" step="0.01" value="8"><input type="range" id="kp0Range" min="0" max="20" step="0.01" value="8" aria-label="左轮 Kp 滑块"></div>
-          <div class="pid-row"><label for="ki0">Ki</label><input type="number" id="ki0" min="0" max="655.35" step="0.01" value="0.3"><input type="range" id="ki0Range" min="0" max="2" step="0.01" value="0.3" aria-label="左轮 Ki 滑块"></div>
+          <div class="pid-row"><label for="kp0">Kp</label><input type="number" id="kp0" min="0" max="655.35" step="0.01" value="14"><input type="range" id="kp0Range" min="0" max="20" step="0.01" value="14" aria-label="左轮 Kp 滑块"></div>
+          <div class="pid-row"><label for="ki0">Ki</label><input type="number" id="ki0" min="0" max="655.35" step="0.01" value="1"><input type="range" id="ki0Range" min="0" max="2" step="0.01" value="1" aria-label="左轮 Ki 滑块"></div>
           <div class="pid-row"><label for="kd0">Kd</label><input type="number" id="kd0" min="0" max="655.35" step="0.01" value="0"><input type="range" id="kd0Range" min="0" max="2" step="0.01" value="0" aria-label="左轮 Kd 滑块"></div>
         </div>
         <div class="pid-wheel">
           <div class="pid-wheel-head"><b>右轮</b><span>增量式 · 输出 PWM</span><button class="btn small" data-pid="1">写入</button></div>
-          <div class="pid-row"><label for="kp1">Kp</label><input type="number" id="kp1" min="0" max="655.35" step="0.01" value="8"><input type="range" id="kp1Range" min="0" max="20" step="0.01" value="8" aria-label="右轮 Kp 滑块"></div>
-          <div class="pid-row"><label for="ki1">Ki</label><input type="number" id="ki1" min="0" max="655.35" step="0.01" value="0.3"><input type="range" id="ki1Range" min="0" max="2" step="0.01" value="0.3" aria-label="右轮 Ki 滑块"></div>
+          <div class="pid-row"><label for="kp1">Kp</label><input type="number" id="kp1" min="0" max="655.35" step="0.01" value="14"><input type="range" id="kp1Range" min="0" max="20" step="0.01" value="14" aria-label="右轮 Kp 滑块"></div>
+          <div class="pid-row"><label for="ki1">Ki</label><input type="number" id="ki1" min="0" max="655.35" step="0.01" value="1"><input type="range" id="ki1Range" min="0" max="2" step="0.01" value="1" aria-label="右轮 Ki 滑块"></div>
           <div class="pid-row"><label for="kd1">Kd</label><input type="number" id="kd1" min="0" max="655.35" step="0.01" value="0"><input type="range" id="kd1Range" min="0" max="2" step="0.01" value="0" aria-label="右轮 Kd 滑块"></div>
         </div>
         <p class="hint">内环为增量式速度 PID，Ki/Kd 沿用 5 ms 离散约定；左右轮建议写入同一组增益。</p>
@@ -2758,6 +2758,7 @@ updateOuterUi();
 /* ============================================================
    100 ms 周期：发送轮速、超时保护、按钮刷新
    ============================================================ */
+let heartbeatTick = 0;
 setInterval(() => {
   if (!app.connected) return;
   const age = app.lastRx ? performance.now() - app.lastRx : Infinity;
@@ -2782,8 +2783,19 @@ setInterval(() => {
 
   if (app.tuning.active) {
     tuningTick();
+    heartbeatTick = 0;
   } else if (app.armed) {
     drive();
+    heartbeatTick = 0;
+  } else if (!app.pendingArm) {
+    /* 空闲时 1 Hz 发 HEARTBEAT：让 F407 菜单能区分“已连接但未使能”
+     * 和“真的断开”，同时不参与任何运动控制。 */
+    if (++heartbeatTick >= 10) {
+      heartbeatTick = 0;
+      send(frame(CMD_HEARTBEAT));
+    }
+  } else {
+    heartbeatTick = 0;
   }
 
   if (age === Infinity) {

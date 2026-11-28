@@ -55,11 +55,12 @@
 
 /* ---------------------------------------------------------------------------
  * 视觉丢失策略
- * 功能：没有新帧或曲率无效时不再判故障，而是沿用最后一次接受的曲率并降速。
- * 取值：降速到 0.18 m/s；0 表示永久保持（不因丢线停车）。改成非 0 后，
- *       在 TRACK 段连续丢失该毫秒数即判赛段故障（断路赛段豁免）。
+ * 功能：没有新帧或曲率无效时不再判故障，沿用最后一次接受的曲率继续行驶。
+ * 取值：当前全速模式不再用 TRACK_HOLD_SPEED_MPS 降速，该宏保留作旧测试/
+ *       以后恢复用；TRACK_VISION_LOST_STOP_MS=0 表示不因丢线停车，
+ *       改成非 0 后在 TRACK 段连续丢失该毫秒数即判赛段故障（断路赛段豁免）。
  * ------------------------------------------------------------------------- */
-#define TRACK_HOLD_SPEED_MPS     0.18f    /* 丢线保持速度，米/秒 */
+#define TRACK_HOLD_SPEED_MPS     0.18f    /* 保留的旧“丢线保持速度”，当前不参与规划 */
 #define TRACK_VISION_LOST_STOP_MS 0U      /* 0=不因丢线停车；非 0=丢失超时判故障 */
 
 /* ---------------------------------------------------------------------------
@@ -80,9 +81,20 @@ typedef enum {
     TRACK_SEGMENT_FAULT      /* 5：赛段故障 */
 } TrackPhase;
 
+/* 赛段故障原因，顺序与菜单“故障 7”显示一致。 */
+typedef enum {
+    TRACK_FAULT_NONE = 0,       /* 无赛段故障 */
+    TRACK_FAULT_PERIOD,         /* 控制周期异常 */
+    TRACK_FAULT_VISION,         /* 视觉丢失超时 */
+    TRACK_FAULT_GAP,            /* 断路超限 */
+    TRACK_FAULT_BYPASS,         /* 绕障超限 */
+    TRACK_FAULT_RED             /* 红障超时 */
+} TrackFaultReason;
+
 /* 巡线状态：里程/航向积分、赛段入口快照与视觉保持量。 */
 typedef struct {
     TrackPhase phase;           /* 当前赛段 */
+    TrackFaultReason fault_reason; /* 进入 FAULT 的原因，供菜单显示 */
     float distance, yaw;        /* 累计里程（米）与航向（弧度） */
     float entry, entry_yaw;     /* 进入当前赛段时的里程与航向 */
     float offset, obstacle_m, goal_m; /* 绕障：横向偏移、障碍距离、剩余目标里程 */

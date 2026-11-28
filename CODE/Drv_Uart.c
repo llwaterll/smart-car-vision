@@ -31,6 +31,10 @@
 #include "NEUQ_lib_include.h"
 #include "Board_Config.h"
 #include "Drv_Uart.h"
+#include "Proto_VisionStatus.h"
+
+#include <stddef.h>
+#include <string.h>
 
 /* NEUQ 驱动持有单字节接收缓冲，错误恢复须复用同一缓冲。 */
 extern UART_HandleTypeDef UART_0_handle;
@@ -54,6 +58,12 @@ static volatile uint8_t s_vis_fault;
 
 /* 1 表示写 Flash 期间暂停入队（此时 CPU 被阻塞，收到的字节不可信）。 */
 static volatile uint8_t s_gate;
+
+#if BOARD_VISION_ENABLE
+/* STATUS 发送缓冲与忙标志：中断发送，忙时丢帧，不阻塞控制中断。 */
+static uint8_t s_vis_tx_buffer[VISION_STATUS_FRAME_SIZE];
+static volatile uint8_t s_vis_tx_busy;
+#endif
 
 /*
  * 函数名称：Uart_Init
@@ -194,6 +204,55 @@ void Uart_ClearVisionFault(void)
 }
 
 /*
+ * 函数名称：Uart_SendVisionStatus
+ * 函数功能：非阻塞启动一帧 STATUS 发送。
+ * 参数说明：data —— 完整帧；len —— 帧长，必须为 36。
+ * 返回参数：1 已启动；0 忙、参数无效或视觉关闭。
+ * 备注信息：HAL_UART_Transmit_IT 只登记发送，不在调用点等待；
+ *           完成回调清忙标志，忙时上层直接丢弃本帧。
+ */
+uint8_t Uart_SendVisionStatus(const uint8_t *data, uint16_t len)
+{
+#if BOARD_VISION_ENABLE
+    if (data == NULL || len != VISION_STATUS_FRAME_SIZE || s_vis_tx_busy)
+    {
+        return 0U;
+    }
+    memcpy(s_vis_tx_buffer, data, len);
+    s_vis_tx_busy = 1U;
+    if (HAL_UART_Transmit_IT(&UART_3_handle, s_vis_tx_buffer, len) != HAL_OK)
+    {
+        s_vis_tx_busy = 0U;
+        return 0U;
+    }
+    return 1U;
+#else
+    (void)data;
+    (void)len;
+    return 0U;
+#endif
+}
+
+/*
+ * 函数名称：HAL_UART_TxCpltCallback
+ * 函数功能：UART 发送完成回调，清视觉 STATUS 忙标志。
+ * 参数说明：huart —— 完成发送的串口句柄。
+ * 返回参数：无。
+ * 备注信息：只处理 UART4；其他串口（蓝牙）不受影响。
+ */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+#if BOARD_VISION_ENABLE
+    if (huart == &UART_3_handle)
+    {
+        s_vis_tx_busy = 0U;
+    }
+#else
+    (void)huart;
+#endif
+}
+
+/*
  * 函数名称：Car_UART_RX_Handler
  * 函数功能：蓝牙串口单字节接收回调，只入 FIFO。
  * 参数说明：byte —— 收到的字节。
@@ -250,6 +309,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     else if (huart == &UART_3_handle)
     {
         s_vis_fault = 1;
+        s_vis_tx_busy = 0U;   /* 出错后清除发送忙，避免 STATUS 永久被丢弃 */
         HAL_UART_Receive_IT(&UART_3_handle, &UART_3_RX_dat, 1);
     }
 #endif

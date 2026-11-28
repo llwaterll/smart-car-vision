@@ -25,6 +25,17 @@ class GlyphTableTests(unittest.TestCase):
         for bitmap in glyphs.values():
             self.assertEqual(len(bitmap), font.HEIGHT * font.STRIDE)
 
+    def test_ui_strings_have_all_glyphs(self):
+        wanted = {ord(ch) for ch in font.collect_chars()}
+        glyphs = set(font.parse_existing(font.OUT_HDR))
+        missing = sorted(wanted - glyphs)
+        self.assertEqual(
+            missing,
+            [],
+            '菜单文案有字库缺字，请运行 python Tools/gen_zh_font.py：'
+            + ''.join(chr(code) for code in missing),
+        )
+
     def test_render_header_round_trips(self):
         glyphs = font.parse_existing(font.OUT_HDR)
         with tempfile.TemporaryDirectory() as folder:

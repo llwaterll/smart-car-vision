@@ -1,7 +1,12 @@
 #include "Proto_Vision.h"
+#include "Proto_VisionStatus.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+/* 主机测试只编译 Tools/check_car.ps1 列出的源文件；把纯编码器直接包含进来，
+ * 让 STATUS 黄金向量在现有视觉测试里执行，不改变测试构建脚本。 */
+#include "Proto_VisionStatus.c"
 
 static unsigned make_frame(uint8_t *f, uint8_t type, uint16_t seq, uint32_t session,
                            uint16_t age, const uint8_t *data, unsigned len)
@@ -84,12 +89,137 @@ static void test_link_alive(void)
     feed(&v,track,n,5000U,0);
     assert(CarVision_LinkAlive(&v,5000U));
 
-    /* 串口接收异常后立即判离线；下一帧合法数据恢复。 */
+    /* 单次串口异常只丢半帧；链路保留到 1.5 s 超时才判离线。 */
     CarVision_Invalidate(&v);
-    assert(!CarVision_LinkAlive(&v,5000U));
+    assert(CarVision_LinkAlive(&v,5000U));
+    assert(!CarVision_LinkAlive(&v,5001U+VIS_LINK_TIMEOUT_MS));
     n = make_frame(status,3,0,42,0,camera,1);
     feed(&v,status,n,5100U,0);
     assert(CarVision_LinkAlive(&v,5100U));
+}
+
+static void test_hello_golden(void)
+{
+    static const uint8_t golden[16] = {
+        0xA5,0x5A,0x01,0x00,0x00,0x00,0x00,0x00,
+        0x11,0x22,0x33,0x44,0x00,0x00,0xE2,0xC7
+    };
+    uint8_t f[VIS_MAX_FRAME];
+    unsigned n = make_frame(f, 0, 0, 0x11223344U, 0, NULL, 0);
+
+    assert(n == sizeof golden);
+    assert(memcmp(f, golden, sizeof golden) == 0);
+}
+
+static void test_status_golden(void)
+{
+    static const uint8_t golden1[VISION_STATUS_FRAME_SIZE] = {
+        0x5A,0xA5,0x01,0x01,0x00,0x1A,0x12,0x34,
+        0x00,0x00,0x03,0x00,0x11,0x22,0x33,0x44,
+        0x00,0x00,0x00,0x64,0x00,0x00,0x00,0x05,
+        0x00,0x00,0x00,0x02,0x00,0x20,0x00,0x00,
+        0xAB,0xCD,0x31,0xD2
+    };
+    static const uint8_t golden2[VISION_STATUS_FRAME_SIZE] = {
+        0x5A,0xA5,0x01,0x01,0x00,0x1A,0x00,0x01,
+        0x01,0x00,0x20,0x03,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,
+        0x00,0x00,0x00,0x00,0xFF,0xFF,0x00,0x00,
+        0x00,0x10,0x7C,0xB6
+    };
+    VisionStatus s;
+    uint8_t out[VISION_STATUS_FRAME_SIZE];
+
+    memset(&s, 0, sizeof s);
+    s.seq = 0x1234;
+    s.state = 0;
+    s.fault = 0;
+    s.flags = VISION_STATUS_FLAG_ALLOW_HELLO | VISION_STATUS_FLAG_SESSION_VALID;
+    s.reject = VISION_REJECT_NONE;
+    s.bound_session = 0x11223344U;
+    s.accepted = 100U;
+    s.rejected = 5U;
+    s.bad = 2U;
+    s.obs_age_ms = 32U;
+    s.uptime_ms = 0x0000ABCDU;
+    assert(VisionStatus_Encode(&s, out) == VISION_STATUS_FRAME_SIZE);
+    assert(memcmp(out, golden1, sizeof golden1) == 0);
+
+    memset(&s, 0, sizeof s);
+    s.seq = 1U;
+    s.state = 1U;
+    s.flags = VISION_STATUS_FLAG_AUTONOMOUS;
+    s.reject = VISION_REJECT_SESSION;
+    s.rejected = 7U;
+    s.obs_age_ms = 0xFFFFU;
+    s.uptime_ms = 0x10U;
+    assert(VisionStatus_Encode(&s, out) == VISION_STATUS_FRAME_SIZE);
+    assert(memcmp(out, golden2, sizeof golden2) == 0);
+}
+
+static void test_last_reject(void)
+{
+    const uint8_t data[16] = {0};
+    uint8_t f[VIS_MAX_FRAME];
+    CarVision v;
+    unsigned n;
+
+    CarVision_Init(&v);
+
+    /* 版本/会话为 0 -> 1 */
+    n = make_frame(f, 1, 1, 0, 0, data, 16);
+    feed(&v, f, n, 10U, 1);
+    assert(v.last_reject == VISION_REJECT_VERSION);
+
+    /* HELLO 不被允许 -> 2 */
+    n = make_frame(f, 0, 0, 42, 0, NULL, 0);
+    feed(&v, f, n, 20U, 0);
+    assert(v.last_reject == VISION_REJECT_HELLO);
+
+    /* 绑定后会话不匹配 -> 3；绑定成功本身必须清除旧拒绝 */
+    feed(&v, f, n, 30U, 1);
+    assert(v.session_valid && v.session == 42U);
+    assert(v.last_reject == VISION_REJECT_NONE);
+    n = make_frame(f, 1, 1, 43, 0, data, 16);
+    feed(&v, f, n, 40U, 1);
+    assert(v.last_reject == VISION_REJECT_SESSION);
+
+    /* 年龄超限 -> 4 */
+    n = make_frame(f, 1, 2, 42, 201, data, 16);
+    feed(&v, f, n, 50U, 1);
+    assert(v.last_reject == VISION_REJECT_AGE);
+
+    /* 有效 TYPE=1 清除 -> 0 */
+    n = make_frame(f, 1, 3, 42, 0, data, 16);
+    feed(&v, f, n, 60U, 1);
+    assert(v.last_reject == VISION_REJECT_NONE);
+
+    /* 序号重复 -> 5 */
+    feed(&v, f, n, 70U, 1);
+    assert(v.last_reject == VISION_REJECT_SEQUENCE);
+
+    /* 字段非法 -> 6 */
+    {
+        uint8_t bad[16] = {0};
+        bad[0] = 0U;
+        bad[1] = 32U;                 /* flags=32 超出协议范围 */
+        n = make_frame(f, 1, 4, 42, 0, bad, 16);
+        feed(&v, f, n, 80U, 1);
+        assert(v.last_reject == VISION_REJECT_PAYLOAD);
+    }
+
+    /* 未知类型 -> 7 */
+    n = make_frame(f, 9, 5, 42, 0, data, 16);
+    feed(&v, f, n, 90U, 1);
+    assert(v.last_reject == VISION_REJECT_TYPE_LENGTH);
+
+    /* 数独块非法 -> 8 */
+    {
+        uint8_t cells[10] = {0,1,2,3,4,5,6,1,2,7};
+        n = make_frame(f, 2, 6, 42, 0, cells, 10);
+        feed(&v, f, n, 100U, 1);
+        assert(v.last_reject == VISION_REJECT_TILE);
+    }
 }
 
 int main(void)
@@ -97,6 +227,9 @@ int main(void)
     CarVision v; CarVisionObservation o; CarVisionTile tile;
     test_hello_recovery();
     test_link_alive();
+    test_hello_golden();
+    test_status_golden();
+    test_last_reject();
     uint8_t f[64],data[16]={0,15,3,132,0,50,0,100,0,20,6,255,0,80,0,0};
     unsigned n; uint16_t crc=0xffff; const uint8_t *s=(const uint8_t *)"123456789";
     while(*s)crc=CarVision_Crc16(crc,*s++);
@@ -180,7 +313,9 @@ int main(void)
     feed(&v,f,n,1000U,0);
     assert(CarVision_GetCameraStatus(&v,1101U) == VISION_CAMERA_UNKNOWN);
     CarVision_Invalidate(&v);
-    assert(CarVision_GetCameraStatus(&v,100U) == VISION_CAMERA_UNKNOWN);
+    /* 单次串口异常不清相机状态；超过 1 s 没新状态帧才变 UNKNOWN。 */
+    assert(CarVision_GetCameraStatus(&v,100U) == VISION_CAMERA_STREAMING);
+    assert(CarVision_GetCameraStatus(&v,1101U) == VISION_CAMERA_UNKNOWN);
 
     /* Estimated curvature can steer, but cannot launch or rejoin on its own. */
     data[0] = 0;

@@ -51,8 +51,8 @@ static void two_laps(void) {
     assert(clearance>0.12f && wheels.rpm[0]==0 && wheels.rpm[1]==0);
 }
 
-/* Single-side estimated curvature may steer at hold speed, but must not refresh
- * the measured-road timestamp or the straight-distance accumulator. */
+/* Single-side estimated curvature may steer at normal speed (no hold-speed cap
+ * now), but must not refresh the measured-road timestamp or straight distance. */
 static void estimated_curvature_hold(void) {
     TrackState r;
     CarVisionObservation o = {0};
@@ -78,7 +78,8 @@ static void estimated_curvature_hold(void) {
     assert(fabsf(r.straight_m - 0.13f) < 0.0001f); /* measured straight only */
     {
         float mps = 6.2831853f * TRACK_RADIUS_M / 60.0f * 0.5f * (cmd.rpm[0] + cmd.rpm[1]);
-        assert(mps <= TRACK_HOLD_SPEED_MPS + 0.001f);
+        /* 减速已取消：单边估计仍可转向，但不再被压到 0.18 m/s。 */
+        assert(mps > TRACK_HOLD_SPEED_MPS + 0.001f);
     }
 }
 
@@ -120,6 +121,15 @@ static void yellow_confirmation(void) {
     assert(r.phase == TRACK_SEGMENT_BYPASS);
 }
 
+/* 赛段故障必须带原因，供菜单“故障 7”显示。 */
+static void fault_reason_period(void) {
+    TrackState r;
+    Track_Start(&r);
+    (void)Track_Step(&r, NULL, 0, 0, 0.0f, 0, 0, 1, 0);
+    assert(r.phase == TRACK_SEGMENT_FAULT);
+    assert(r.fault_reason == TRACK_FAULT_PERIOD);
+}
+
 int main(void) {
     TrackState r;
     TrackDrive cmd;
@@ -137,6 +147,7 @@ int main(void) {
     assert(!Sudoku_Solve(tiles,answer));
     estimated_curvature_hold();
     yellow_confirmation();
+    fault_reason_period();
     Track_Start(&r);
     o.valid_mask=VISION_CURVATURE_VALID; o.curvature_inv_m=3; o.confidence=1;
     cmd=Track_Step(&r,&o,0,0,0.005f,0,0,1,0);

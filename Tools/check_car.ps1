@@ -22,7 +22,9 @@ try {
     }
 
     # 代码目录按功能分类，头文件按文件名互相引用，因此每个子目录都要加进 -I。
-    $inc = '-I Tests/stubs -I CODE'
+    # 用数组而不是单个字符串：PowerShell 把带空格的字符串作为“一个”参数传给
+    # clang.cmd 时，-I 与路径会被当成同一个参数，导致找不到头文件。
+    $inc = @('-I', 'Tests/stubs', '-I', 'CODE')
 
     python -m unittest discover -s Tests -p 'test_*.py' -v
     if ($LASTEXITCODE -ne 0) { throw 'Python tests failed' }
@@ -36,10 +38,17 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Cold start / UART routing failed (vision=$visionEnabled)" }
     }
 
-    clang -std=c99 -Wall -Wextra -Werror $inc Tests/test_car_core.c CODE/Task_Fsm.c CODE/Pid.c CODE/Proto_Bluetooth.c -o build/test_car_core.exe
+    # 传统故障停车模式的回归用 CAR_FAULT_STOP_ENABLE=1 编译；
+    # 默认固件是记录模式（0），另由 test_car_fault_log 覆盖。
+    clang -std=c99 -Wall -Wextra -Werror -DCAR_FAULT_STOP_ENABLE=1 $inc Tests/test_car_core.c CODE/Task_Fsm.c CODE/Pid.c CODE/Proto_Bluetooth.c -o build/test_car_core.exe
     if ($LASTEXITCODE -ne 0) { throw 'Core test compilation failed' }
     & (Join-Path $carOutput 'test_car_core.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
+
+    clang -std=c99 -Wall -Wextra -Werror $inc Tests/test_car_fault_log.c CODE/Task_Fsm.c CODE/Pid.c CODE/Proto_Bluetooth.c -o build/test_car_fault_log.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Fault log test compilation failed' }
+    & (Join-Path $carOutput 'test_car_fault_log.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Fault log tests failed' }
 
     clang -std=c99 -Wall -Wextra -Werror $inc Tests/test_car_pid.c CODE/Pid.c -o build/test_car_pid.exe
     if ($LASTEXITCODE -ne 0) { throw 'PID test compilation failed' }
